@@ -389,8 +389,6 @@ jobs:
     needs: [deployment-config]
     if: ${{ needs.deployment-config.outputs.build_images == 'true' }}
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.deployment-config.outputs.app_env }}
     permissions:
       id-token: write
       contents: read
@@ -440,8 +438,6 @@ jobs:
     needs: [deployment-config, build-images]
     if: ${{ github.event.inputs.run_security_scan != 'false' && needs.deployment-config.outputs.build_images == 'true' }}
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.deployment-config.outputs.app_env }}
     permissions:
       id-token: write
       contents: read
@@ -489,7 +485,7 @@ jobs:
       id-token: write
       contents: read
     environment:
-      name: ${{ needs.deployment-config.outputs.infra_env }}
+      name: ${{ needs.deployment-config.outputs.infra_env == 'prod' && 'prod' || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -516,7 +512,7 @@ jobs:
           action: ${{ github.event.inputs.infra_action }}
 
   # ============================================================================
-  # STAGE 5B: DESTROY INFRASTRUCTURE (APPROVAL GATE)
+  # STAGE 5B: DESTROY INFRASTRUCTURE (APPROVAL GATE - ALWAYS REQUIRES APPROVAL)
   # ============================================================================
   destroy-infrastructure:
     needs: [deployment-config, quality-checks]
@@ -526,7 +522,7 @@ jobs:
       id-token: write
       contents: read
     environment:
-      name: ${{ needs.deployment-config.outputs.infra_env == 'prod' && 'prod' || 'dev' }}
+      name: ${{ needs.deployment-config.outputs.infra_env }}  # Routes to 'dev' or 'prod' environment for approval
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -566,7 +562,7 @@ jobs:
       id-token: write
       contents: read
     environment:
-      name: ${{ needs.deployment-config.outputs.app_env }}
+      name: ${{ needs.deployment-config.outputs.app_env == 'prod' && 'prod' || '' }}
     steps:
       - name: Display application deployment parameters
         run: |
