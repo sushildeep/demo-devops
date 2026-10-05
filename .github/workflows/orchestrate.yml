@@ -253,6 +253,8 @@ jobs:
     needs: quality-checks
     if: ${{ github.event.inputs.terraform_plan != 'false' }}
     runs-on: ubuntu-latest
+    environment:
+      name: terraform  # No protection rules - allows OIDC without approval
     strategy:
       matrix:
         environment: [dev, prod]
