@@ -253,12 +253,13 @@ jobs:
     needs: quality-checks
     if: ${{ github.event.inputs.terraform_plan != 'false' }}
     runs-on: ubuntu-latest
-    environment:
-      name: terraform  # No protection rules - allows OIDC without approval
     strategy:
       matrix:
         environment: [dev, prod]
       fail-fast: false
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       dev-adds: ${{ steps.parse_plan.outputs.resources_to_add }}
       dev-updates: ${{ steps.parse_plan.outputs.resources_to_update }}
@@ -267,9 +268,6 @@ jobs:
       dev-adds-list: ${{ steps.parse_plan.outputs.adds_list }}
       dev-updates-list: ${{ steps.parse_plan.outputs.updates_list }}
       dev-deletes-list: ${{ steps.parse_plan.outputs.deletes_list }}
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
