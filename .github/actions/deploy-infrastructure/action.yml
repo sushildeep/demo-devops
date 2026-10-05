@@ -1,55 +1,68 @@
-name: 'Deploy Infrastructure with Terraform'
-description: 'Initialize, plan, and apply Terraform infrastructure'
+name: Deploy Infrastructure with Terraform
+description: Manage AWS infrastructure using Terraform and GitHub OIDC
 
 inputs:
-  aws-account-id:
-    description: 'AWS Account ID'
-    required: true
   aws-region:
-    description: 'AWS Region'
-    required: true
-    default: 'us-east-1'
+    description: AWS Region
+    required: false
+    default: us-east-1
+
   terraform-version:
-    description: 'Terraform version to use'
+    description: Terraform version
     required: false
-    default: '1.5.0'
+    default: 1.5.0
+
   environment:
-    description: 'Environment (dev, prod)'
+    description: Environment name
     required: true
+
   terraform-dir:
-    description: 'Terraform directory path'
+    description: Terraform directory
     required: true
-    default: 'terraform/environments'
+    default: terraform/environments
+
   tfvars-file:
-    description: 'Path to terraform.tfvars file'
+    description: Terraform variables file
     required: true
+
   aws-role-to-assume:
-    description: 'AWS IAM role to assume for OIDC'
+    description: AWS IAM role ARN for GitHub OIDC
     required: true
+
   state-bucket:
-    description: 'S3 bucket for Terraform state'
+    description: S3 bucket for Terraform state
     required: true
+
   state-key:
-    description: 'S3 key for Terraform state'
+    description: S3 key for Terraform state
     required: true
+
+  state-lock-table:
+    description: DynamoDB table for Terraform state locking
+    required: true
+
   action:
-    description: 'Terraform action (plan or apply)'
+    description: Terraform action
     required: false
-    default: 'plan'
+    default: plan
 
 outputs:
   plan-exists:
-    description: 'Whether terraform plan was created'
+    description: Whether Terraform plan contains changes
     value: ${{ steps.plan.outputs.plan-exists }}
+
   apply-summary:
-    description: 'Summary of apply results'
+    description: Terraform operation summary
     value: ${{ steps.apply.outputs.summary }}
 
 runs:
-  using: 'composite'
+  using: composite
+
   steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+
+    # ----------------------------------------------------------
+    # AWS OIDC
+    # ----------------------------------------------------------
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -57,161 +70,209 @@ runs:
         role-to-assume: ${{ inputs.aws-role-to-assume }}
         aws-region: ${{ inputs.aws-region }}
 
+    - name: Verify AWS identity
+      shell: bash
+      run: |
+        set -e
+
+        echo "AWS Identity:"
+        aws sts get-caller-identity
+
+    # ----------------------------------------------------------
+    # Terraform
+    # ----------------------------------------------------------
+
     - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
+      uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: ${{ inputs.terraform-version }}
+
+    # ----------------------------------------------------------
+    # Format
+    # ----------------------------------------------------------
 
     - name: Terraform Format Check
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
-        echo "Checking Terraform format..."
-        terraform fmt -check -recursive || {
-          echo "❌ Terraform files are not formatted correctly"
-          echo "Run: terraform fmt -recursive"
-          exit 1
-        }
-        echo "✅ Terraform format check passed"
+        set -e
+
+        terraform fmt -check -recursive
+
+        echo "Terraform format check passed."
+
+    # ----------------------------------------------------------
+    # Init
+    # ----------------------------------------------------------
 
     - name: Terraform Init
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
-        echo "Initializing Terraform..."
+        set -e
+
         terraform init \
           -backend-config="bucket=${{ inputs.state-bucket }}" \
           -backend-config="key=${{ inputs.state-key }}" \
           -backend-config="region=${{ inputs.aws-region }}" \
-          -backend-config="encrypt=true"
-        echo "✅ Terraform initialized"
+          -backend-config="encrypt=true" \
+          -backend-config="dynamodb_table=${{ inputs.state-lock-table }}"
+
+        echo "Terraform initialized."
+
+    # ----------------------------------------------------------
+    # Validate
+    # ----------------------------------------------------------
 
     - name: Terraform Validate
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
-        echo "Validating Terraform configuration..."
+        set -e
+
         terraform validate
-        echo "✅ Terraform validation passed"
+
+        echo "Terraform validation passed."
+
+    # ----------------------------------------------------------
+    # Plan
+    # ----------------------------------------------------------
 
     - name: Terraform Plan
       id: plan
+      if: inputs.action == 'plan' || inputs.action == 'apply'
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
-        echo "Creating Terraform plan..."
-        terraform plan \
-          -var-file="terraform.tfvars" \
-          -out=tfplan \
-          -detailed-exitcode || EXIT_CODE=$?
+        set +e
 
-        if [ "${EXIT_CODE:-0}" -eq 0 ]; then
-          echo "✅ No infrastructure changes"
-          echo "plan-exists=false" >> $GITHUB_OUTPUT
-        elif [ "${EXIT_CODE:-0}" -eq 2 ]; then
-          echo "✅ Infrastructure changes detected"
-          echo "plan-exists=true" >> $GITHUB_OUTPUT
+        echo "Creating Terraform plan..."
+
+        terraform plan \
+          -var-file="${{ inputs.tfvars-file }}" \
+          -out=tfplan \
+          -detailed-exitcode
+
+        EXIT_CODE=$?
+
+        if [ "$EXIT_CODE" -eq 0 ]; then
+          echo "No infrastructure changes."
+          echo "plan-exists=false" >> "$GITHUB_OUTPUT"
+
+        elif [ "$EXIT_CODE" -eq 2 ]; then
+          echo "Infrastructure changes detected."
+          echo "plan-exists=true" >> "$GITHUB_OUTPUT"
+
         else
-          echo "❌ Terraform plan failed"
-          exit 1
+          echo "Terraform plan failed."
+          exit "$EXIT_CODE"
         fi
 
+    # ----------------------------------------------------------
+    # Upload Plan
+    # ----------------------------------------------------------
+
     - name: Upload Terraform Plan
-      if: always()
+      if: |
+        always() &&
+        (inputs.action == 'plan' || inputs.action == 'apply')
       uses: actions/upload-artifact@v4
       with:
         name: terraform-plan-${{ inputs.environment }}
         path: ${{ inputs.terraform-dir }}/${{ inputs.environment }}/tfplan
+        if-no-files-found: ignore
         retention-days: 7
 
-    - name: Terraform Destroy Plan
-      id: destroy-plan
-      if: inputs.action == 'destroy'
-      shell: bash
-      working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
-      run: |
-        echo "Creating Terraform destroy plan..."
-        terraform plan \
-          -var-file="terraform.tfvars" \
-          -destroy \
-          -out=tfplan_destroy \
-          -detailed-exitcode || EXIT_CODE=$?
-
-        if [ "${EXIT_CODE:-0}" -eq 0 ]; then
-          echo "✅ No infrastructure to destroy"
-          echo "plan-exists=false" >> $GITHUB_OUTPUT
-        elif [ "${EXIT_CODE:-0}" -eq 2 ]; then
-          echo "✅ Infrastructure destruction plan created"
-          echo "plan-exists=true" >> $GITHUB_OUTPUT
-        else
-          echo "❌ Terraform destroy plan failed"
-          exit 1
-        fi
+    # ----------------------------------------------------------
+    # Apply
+    # ----------------------------------------------------------
 
     - name: Terraform Apply
       id: apply
-      if: inputs.action == 'apply' && steps.plan.outputs.plan-exists == 'true'
+      if: |
+        inputs.action == 'apply' &&
+        steps.plan.outputs.plan-exists == 'true'
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
+        set -e
+
         echo "Applying Terraform changes..."
+
         terraform apply \
           -auto-approve \
           -input=false \
           tfplan
-        echo "✅ Terraform apply completed"
-        echo "summary=Terraform infrastructure deployed successfully" >> $GITHUB_OUTPUT
 
-    - name: Terraform Destroy
-      id: destroy
-      if: inputs.action == 'destroy' && steps.destroy-plan.outputs.plan-exists == 'true'
-      shell: bash
-      working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
-      run: |
-        echo "🔥 DESTROYING Terraform infrastructure..."
-        terraform destroy \
-          -auto-approve \
-          -input=false \
-          -var-file="terraform.tfvars"
-        echo "✅ Terraform destroy completed"
-        echo "summary=Terraform infrastructure destroyed successfully" >> $GITHUB_OUTPUT
+        echo "Terraform apply completed."
 
-    - name: Get Terraform Outputs
+        echo "summary=Terraform infrastructure deployed successfully" \
+          >> "$GITHUB_OUTPUT"
+
+    # ----------------------------------------------------------
+    # Terraform Outputs
+    # ----------------------------------------------------------
+
+    - name: Terraform Outputs
       if: inputs.action == 'apply'
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
-        echo "📋 Terraform Outputs:"
+        set -e
+
+        echo "Terraform Outputs:"
         terraform output
-        echo ""
-        echo "Saving outputs to file..."
+
         terraform output -json > terraform-outputs.json
 
     - name: Upload Terraform Outputs
-      if: inputs.action == 'apply' && always()
+      if: inputs.action == 'apply'
       uses: actions/upload-artifact@v4
       with:
         name: terraform-outputs-${{ inputs.environment }}
         path: ${{ inputs.terraform-dir }}/${{ inputs.environment }}/terraform-outputs.json
+        if-no-files-found: ignore
         retention-days: 30
 
-    - name: Show Apply Plan Summary
-      if: inputs.action == 'apply' && steps.plan.outputs.plan-exists == 'true'
-      shell: bash
-      working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
-      run: |
-        echo "📊 Infrastructure Changes (Apply):"
-        terraform plan \
-          -var-file="terraform.tfvars" \
-          -no-color | grep -E "^(Plan:|No changes|.*create|.*update|.*destroy)" || true
+    # ----------------------------------------------------------
+    # Destroy
+    # ----------------------------------------------------------
 
-    - name: Show Destroy Plan Summary
-      if: inputs.action == 'destroy' && steps.destroy-plan.outputs.plan-exists == 'true'
+    - name: Terraform Destroy
+      id: destroy
+      if: inputs.action == 'destroy'
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
-        echo "📊 Infrastructure to Destroy:"
-        terraform plan \
-          -var-file="terraform.tfvars" \
-          -destroy \
-          -no-color | grep -E "^(Plan:|No changes|.*destroy)" || true
+        set -e
+
+        echo "WARNING: Destroying infrastructure."
+        echo "Environment: ${{ inputs.environment }}"
+
+        terraform destroy \
+          -auto-approve \
+          -input=false \
+          -var-file="${{ inputs.tfvars-file }}"
+
+        echo "Terraform destroy completed."
+
+        echo "summary=Terraform infrastructure destroyed successfully" \
+          >> "$GITHUB_OUTPUT"
+
+    # ----------------------------------------------------------
+    # Summary
+    # ----------------------------------------------------------
+
+    - name: Terraform Summary
+      if: always()
+      shell: bash
+      run: |
+        echo "=========================================="
+        echo "Terraform Summary"
+        echo "=========================================="
+        echo "Environment : ${{ inputs.environment }}"
+        echo "Action      : ${{ inputs.action }}"
+        echo "State Bucket: ${{ inputs.state-bucket }}"
+        echo "State Key   : ${{ inputs.state-key }}"
+        echo "Lock Table  : ${{ inputs.state-lock-table }}"
+        echo "=========================================="

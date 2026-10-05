@@ -1,720 +1,214 @@
-name: Complete CI/CD Orchestration
+name: CI/CD Pipeline
 
 on:
   workflow_dispatch:
     inputs:
+
+      environment:
+        description: Deployment environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+
       build_images:
-        description: 'Build Docker images?'
-        required: false
+        description: Build Docker images?
+        required: true
         type: boolean
         default: true
 
-      build_services:
-        description: 'Services to build (all, user-service, order-service)'
-        required: false
-        type: choice
-        options:
-          - all
-          - user-service
-          - order-service
-        default: all
-
       deploy_infrastructure:
-        description: 'Deploy infrastructure?'
-        required: false
+        description: Deploy Terraform infrastructure?
+        required: true
         type: boolean
         default: false
 
-      infra_action:
-        description: 'Infrastructure action (plan or apply)'
-        required: false
+      terraform_action:
+        description: Terraform action
+        required: true
         type: choice
         options:
           - plan
           - apply
         default: plan
 
-      infra_environment:
-        description: 'Infrastructure environment (dev, prod)'
-        required: false
-        type: choice
-        options:
-          - dev
-          - prod
-        default: dev
-
       deploy_application:
-        description: 'Deploy application?'
-        required: false
+        description: Deploy application to EKS?
+        required: true
         type: boolean
         default: false
 
-      app_environment:
-        description: 'Application environment (dev, prod)'
-        required: false
-        type: choice
-        options:
-          - dev
-          - prod
-        default: dev
-
       user_service_tag:
-        description: 'User service image tag (leave empty for auto)'
+        description: User service image tag
         required: false
         type: string
 
       order_service_tag:
-        description: 'Order service image tag (leave empty for auto)'
+        description: Order service image tag
         required: false
         type: string
 
-      run_tests:
-        description: 'Run tests?'
-        required: false
-        type: boolean
-        default: true
-
-      terraform_plan:
-        description: 'Run Terraform plan and drift detection?'
-        required: false
-        type: boolean
-        default: true
-
-      run_security_scan:
-        description: 'Run security scans?'
-        required: false
-        type: boolean
-        default: true
-
-      helm_timeout:
-        description: 'Helm deployment timeout'
-        required: false
-        type: choice
-        options:
-          - 5m
-          - 10m
-          - 15m
-          - 20m
-        default: 10m
-
-      wait_for_rollout:
-        description: 'Wait for Kubernetes rollout?'
-        required: false
-        type: boolean
-        default: true
-
-      destroy_infrastructure:
-        description: 'Destroy infrastructure? (DESTRUCTIVE - requires approval)'
-        required: false
-        type: boolean
-        default: false
 
 env:
   AWS_REGION: us-east-1
-  TERRAFORM_VERSION: 1.5.0
-  HELM_CHART_PATH: ./helm
-  HELM_RELEASE_NAME: microservices-app
-  HELM_NAMESPACE: default
+  TERRAFORM_VERSION: "1.5.0"
+
 
 jobs:
-  # ============================================================================
-  # DETERMINE CONFIGURATION
-  # ============================================================================
-  deployment-config:
+
+  # ==========================================================
+  # 1. BUILD
+  # ==========================================================
+
+  build:
+    name: Build Docker Images
+    if: ${{ inputs.build_images }}
     runs-on: ubuntu-latest
-    outputs:
-      build_images: ${{ steps.config.outputs.build_images }}
-      deploy_infra: ${{ steps.config.outputs.deploy_infra }}
-      deploy_app: ${{ steps.config.outputs.deploy_app }}
-      infra_env: ${{ steps.config.outputs.infra_env }}
-      app_env: ${{ steps.config.outputs.app_env }}
-      user_tag: ${{ steps.config.outputs.user_tag }}
-      order_tag: ${{ steps.config.outputs.order_tag }}
-      cluster_name_dev: ${{ steps.config.outputs.cluster_name_dev }}
-      cluster_name_prod: ${{ steps.config.outputs.cluster_name_prod }}
-      helm_values_dev: ${{ steps.config.outputs.helm_values_dev }}
-      helm_values_prod: ${{ steps.config.outputs.helm_values_prod }}
-    steps:
-      - name: Determine configuration
-        id: config
-        run: |
-          # Build configuration
-          BUILD_IMAGES="${{ github.event.inputs.build_images }}"
-          [ -z "$BUILD_IMAGES" ] && BUILD_IMAGES="true"
-          echo "build_images=$BUILD_IMAGES" >> $GITHUB_OUTPUT
 
-          # Infrastructure configuration
-          DEPLOY_INFRA="${{ github.event.inputs.deploy_infrastructure }}"
-          [ -z "$DEPLOY_INFRA" ] && DEPLOY_INFRA="false"
-          echo "deploy_infra=$DEPLOY_INFRA" >> $GITHUB_OUTPUT
-
-          INFRA_ENV="${{ github.event.inputs.infra_environment }}"
-          [ -z "$INFRA_ENV" ] && INFRA_ENV="dev"
-          echo "infra_env=$INFRA_ENV" >> $GITHUB_OUTPUT
-
-          # Application configuration
-          DEPLOY_APP="${{ github.event.inputs.deploy_application }}"
-          [ -z "$DEPLOY_APP" ] && DEPLOY_APP="false"
-          echo "deploy_app=$DEPLOY_APP" >> $GITHUB_OUTPUT
-
-          APP_ENV="${{ github.event.inputs.app_environment }}"
-          [ -z "$APP_ENV" ] && APP_ENV="dev"
-          echo "app_env=$APP_ENV" >> $GITHUB_OUTPUT
-
-          # Image tags
-          USER_TAG="${{ github.event.inputs.user_service_tag }}"
-          [ -z "$USER_TAG" ] && USER_TAG="${{ github.sha }}"
-          echo "user_tag=$USER_TAG" >> $GITHUB_OUTPUT
-
-          ORDER_TAG="${{ github.event.inputs.order_service_tag }}"
-          [ -z "$ORDER_TAG" ] && ORDER_TAG="${{ github.sha }}"
-          echo "order_tag=$ORDER_TAG" >> $GITHUB_OUTPUT
-
-          # Cluster names
-          echo "cluster_name_dev=microservices-dev-eks" >> $GITHUB_OUTPUT
-          echo "cluster_name_prod=microservices-prod-eks" >> $GITHUB_OUTPUT
-
-          # Helm values files
-          echo "helm_values_dev=helm/values-dev.yaml" >> $GITHUB_OUTPUT
-          echo "helm_values_prod=helm/values-prod.yaml" >> $GITHUB_OUTPUT
-
-  # ============================================================================
-  # STAGE 1: VALIDATE & TEST
-  # ============================================================================
-  quality-checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Run pre-commit hooks
-        uses: pre-commit/action@v3.0.0
-        continue-on-error: true
-
-  test:
-    needs: quality-checks
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.run_tests != 'false' }}
-    strategy:
-      matrix:
-        service: [user-service, order-service]
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ${{ matrix.service == 'user-service' && 'users_db' || 'orders_db' }}
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Run tests for ${{ matrix.service }}
-        run: |
-          cd services/${{ matrix.service }}
-          pip install -r requirements.txt
-          pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
-        env:
-          DB_HOST: localhost
-          DB_USER: postgres
-          DB_PASSWORD: postgres
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./services/${{ matrix.service }}/coverage.xml
-          flags: ${{ matrix.service }}
-
-  # ============================================================================
-  # STAGE 2: TERRAFORM PLAN & DRIFT DETECTION
-  # ============================================================================
-  terraform-plan:
-    name: Terraform Plan - ${{ matrix.environment }}
-    needs: quality-checks
-    if: ${{ github.event.inputs.terraform_plan != 'false' }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        environment: [dev, prod]
-      fail-fast: false
     permissions:
       id-token: write
       contents: read
-    outputs:
-      dev-adds: ${{ steps.parse_plan.outputs.resources_to_add }}
-      dev-updates: ${{ steps.parse_plan.outputs.resources_to_update }}
-      dev-deletes: ${{ steps.parse_plan.outputs.resources_to_delete }}
-      dev-status: ${{ steps.plan.outputs.plan_status }}
-      dev-adds-list: ${{ steps.parse_plan.outputs.adds_list }}
-      dev-updates-list: ${{ steps.parse_plan.outputs.updates_list }}
-      dev-deletes-list: ${{ steps.parse_plan.outputs.deletes_list }}
+
     steps:
-      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build user-service
+        uses: ./.github/actions/build-and-push-image
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Terraform Format Check
-        working-directory: terraform/environments/${{ matrix.environment }}
-        run: |
-          echo "Checking Terraform format..."
-          if ! terraform fmt -check -recursive; then
-            echo "❌ Terraform files are not formatted correctly"
-            exit 1
-          fi
-          echo "✅ Terraform format check passed"
-
-      - name: Terraform Init
-        working-directory: terraform/environments/${{ matrix.environment }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
-            -backend-config="key=microservices/${{ matrix.environment }}/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
-            -backend-config="encrypt=true" \
-            -backend-config="dynamodb_table=${{ secrets.TERRAFORM_LOCK_TABLE }}" \
-            -upgrade
-
-      - name: Terraform Validate
-        working-directory: terraform/environments/${{ matrix.environment }}
-        run: terraform validate
-
-      - name: Terraform Plan
-        id: plan
-        working-directory: terraform/environments/${{ matrix.environment }}
-        continue-on-error: true
-        run: |
-          terraform plan \
-            -var-file="terraform.tfvars" \
-            -out=tfplan \
-            -detailed-exitcode \
-            -lock=false \
-            2>&1 | tee plan.log
-
-          PLAN_EXIT=$?
-          [ $PLAN_EXIT -eq 0 ] && echo "plan_status=NO_CHANGES" >> $GITHUB_OUTPUT
-          [ $PLAN_EXIT -eq 2 ] && echo "plan_status=CHANGES_DETECTED" >> $GITHUB_OUTPUT
-          [ $PLAN_EXIT -gt 2 ] && echo "plan_status=FAILED" >> $GITHUB_OUTPUT
-          echo "exit_code=$PLAN_EXIT" >> $GITHUB_OUTPUT
-
-      - name: Parse Plan Output
-        id: parse_plan
-        if: steps.plan.outputs.plan_status != 'FAILED'
-        working-directory: terraform/environments/${{ matrix.environment }}
-        run: |
-          PLAN_JSON=$(terraform show -json tfplan 2>/dev/null || echo "{}")
-          ADDS=$(echo "$PLAN_JSON" | jq '[.resource_changes[]? | select(.change.actions[] == "create")] | length' 2>/dev/null || echo "0")
-          UPDATES=$(echo "$PLAN_JSON" | jq '[.resource_changes[]? | select(.change.actions[] == "update")] | length' 2>/dev/null || echo "0")
-          DELETES=$(echo "$PLAN_JSON" | jq '[.resource_changes[]? | select(.change.actions[] == "delete")] | length' 2>/dev/null || echo "0")
-
-          # Get resource names for each action
-          ADDS_LIST=$(echo "$PLAN_JSON" | jq -r '[.resource_changes[]? | select(.change.actions[] == "create") | .address] | join(", ")' 2>/dev/null || echo "")
-          UPDATES_LIST=$(echo "$PLAN_JSON" | jq -r '[.resource_changes[]? | select(.change.actions[] == "update") | .address] | join(", ")' 2>/dev/null || echo "")
-          DELETES_LIST=$(echo "$PLAN_JSON" | jq -r '[.resource_changes[]? | select(.change.actions[] == "delete") | .address] | join(", ")' 2>/dev/null || echo "")
-
-          echo "resources_to_add=$ADDS" >> $GITHUB_OUTPUT
-          echo "resources_to_update=$UPDATES" >> $GITHUB_OUTPUT
-          echo "resources_to_delete=$DELETES" >> $GITHUB_OUTPUT
-          echo "adds_list=$ADDS_LIST" >> $GITHUB_OUTPUT
-          echo "updates_list=$UPDATES_LIST" >> $GITHUB_OUTPUT
-          echo "deletes_list=$DELETES_LIST" >> $GITHUB_OUTPUT
-
-      - name: Display Plan Summary
-        if: steps.plan.outputs.plan_status != 'FAILED'
-        working-directory: terraform/environments/${{ matrix.environment }}
-        run: |
-          echo "📋 TERRAFORM PLAN SUMMARY - ${{ matrix.environment }}"
-          echo ""
-          echo "Resources to ADD:    ${{ steps.parse_plan.outputs.resources_to_add }}"
-          echo "Resources to UPDATE: ${{ steps.parse_plan.outputs.resources_to_update }}"
-          echo "Resources to DELETE: ${{ steps.parse_plan.outputs.resources_to_delete }}"
-          echo ""
-          echo "🔍 DETAILED PLAN WITH VALUES:"
-          echo "============================================"
-          terraform show -no-color tfplan 2>/dev/null | grep -A 5 -E "(resource|~|->|+|-):|Plan:" || terraform show -no-color tfplan | head -300
-          echo "============================================"
-          echo ""
-          echo "Full plan saved in artifacts: terraform-plan-log-${{ matrix.environment }}-${{ github.run_id }}"
-
-      - name: Upload Terraform Plan
-        if: steps.plan.outputs.plan_status != 'FAILED'
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-${{ matrix.environment }}-${{ github.run_id }}
-          path: terraform/environments/${{ matrix.environment }}/tfplan
-          retention-days: 7
-
-      - name: Upload Plan Log
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan-log-${{ matrix.environment }}-${{ github.run_id }}
-          path: terraform/environments/${{ matrix.environment }}/plan.log
-          retention-days: 7
-
-
-  # ============================================================================
-  # STAGE 3: BUILD DOCKER IMAGES
-  # ============================================================================
-  build-images:
-    needs: [deployment-config]
-    if: ${{ needs.deployment-config.outputs.build_images == 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    strategy:
-      matrix:
-        service:
-          - user-service
-          - order-service
-    outputs:
-      user-service-uri: ${{ steps.user-service.outputs.image-uri || '' }}
-      order-service-uri: ${{ steps.order-service.outputs.image-uri || '' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and push user-service
-        if: ${{ matrix.service == 'user-service' && (github.event.inputs.build_services == 'all' || github.event.inputs.build_services == 'user-service') }}
-        id: user-service
-        uses: ./.github/actions/build-and-push-image/
-        with:
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws-region: ${{ env.AWS_REGION }}
           service-name: user-service
           dockerfile-path: ./services/user-service
-          image-tag: ${{ needs.deployment-config.outputs.user_tag }}
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          environment-tag: ${{ needs.deployment-config.outputs.app_env == 'prod' && 'latest' || 'develop' }}
-          ecr-repository: ${{ needs.deployment-config.outputs.app_env }}
+          image-tag: ${{ inputs.user_service_tag || github.sha }}
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          environment-tag: ${{ inputs.environment }}
+          ecr-repository: ${{ inputs.environment }}
 
-      - name: Build and push order-service
-        if: ${{ matrix.service == 'order-service' && (github.event.inputs.build_services == 'all' || github.event.inputs.build_services == 'order-service') }}
-        id: order-service
-        uses: ./.github/actions/build-and-push-image/
+      - name: Build order-service
+        uses: ./.github/actions/build-and-push-image
         with:
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws-region: ${{ env.AWS_REGION }}
           service-name: order-service
           dockerfile-path: ./services/order-service
-          image-tag: ${{ needs.deployment-config.outputs.order_tag }}
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          environment-tag: ${{ needs.deployment-config.outputs.app_env == 'prod' && 'latest' || 'develop' }}
-          ecr-repository: ${{ needs.deployment-config.outputs.app_env }}
+          image-tag: ${{ inputs.order_service_tag || github.sha }}
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          environment-tag: ${{ inputs.environment }}
+          ecr-repository: ${{ inputs.environment }}
 
-  # ============================================================================
-  # STAGE 4: SECURITY SCANNING
-  # ============================================================================
-  security-scan:
-    needs: [deployment-config, build-images]
-    if: ${{ github.event.inputs.run_security_scan != 'false' && needs.deployment-config.outputs.build_images == 'true' }}
+
+  # ==========================================================
+  # 2. TERRAFORM PLAN
+  # ==========================================================
+
+  terraform-plan:
+    name: Terraform Plan
+    if: ${{ inputs.deploy_infrastructure }}
     runs-on: ubuntu-latest
+
     permissions:
       id-token: write
       contents: read
-    strategy:
-      matrix:
-        service: [user-service, order-service]
+
     steps:
-      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.20.0
-        with:
-          image-ref: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/dev:${{ matrix.service }}
-          format: 'sarif'
-          output: 'trivy-results-${{ matrix.service }}.sarif'
-          severity: 'HIGH,CRITICAL'
-
-      - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
-
-      - name: Run SAST with Bandit
-        run: |
-          pip install bandit
-          bandit -r services/${{ matrix.service }} -f json -o bandit-${{ matrix.service }}.json || true
-
-  # ============================================================================
-  # STAGE 5: DEPLOY INFRASTRUCTURE
-  # ============================================================================
-  deploy-infrastructure:
-    needs: [deployment-config, quality-checks, terraform-plan]
-    if: ${{ needs.deployment-config.outputs.deploy_infra == 'true' && github.event.inputs.infra_action == 'apply' }}
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    environment:
-      name: ${{ needs.deployment-config.outputs.infra_env == 'prod' && 'prod' || '' }}
-    steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Display infrastructure deployment parameters
-        run: |
-          echo "🏗️  Infrastructure Deployment"
-          echo "Environment: ${{ needs.deployment-config.outputs.infra_env }}"
-          echo "Action: ${{ github.event.inputs.infra_action }}"
-          echo "Terraform Version: ${{ env.TERRAFORM_VERSION }}"
-
-      - name: Deploy infrastructure
-        uses: ./.github/actions/deploy-infrastructure/
+      - name: Terraform Plan
+        uses: ./.github/actions/deploy-infrastructure
         with:
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws-region: ${{ env.AWS_REGION }}
           terraform-version: ${{ env.TERRAFORM_VERSION }}
-          environment: ${{ needs.deployment-config.outputs.infra_env }}
-          terraform-dir: 'terraform/environments'
-          tfvars-file: 'terraform/environments/${{ needs.deployment-config.outputs.infra_env }}/terraform.tfvars'
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          state-bucket: ${{ secrets.TERRAFORM_STATE_BUCKET }}
-          state-key: 'microservices/${{ needs.deployment-config.outputs.infra_env }}/terraform.tfstate'
-          action: ${{ github.event.inputs.infra_action }}
+          environment: ${{ inputs.environment }}
+          terraform-dir: terraform/environments
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
+          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+          action: plan
 
-  # ============================================================================
-  # STAGE 5B: DESTROY INFRASTRUCTURE (APPROVAL GATE - ALWAYS REQUIRES APPROVAL)
-  # ============================================================================
-  destroy-infrastructure:
-    needs: [deployment-config, quality-checks]
-    if: ${{ github.event.inputs.destroy_infrastructure == 'true' }}
+
+  # ==========================================================
+  # 3. APPROVAL + TERRAFORM APPLY
+  # ==========================================================
+
+  terraform-apply:
+    name: Terraform Apply
+    needs: terraform-plan
+    if: ${{ inputs.deploy_infrastructure && inputs.terraform_action == 'apply' }}
     runs-on: ubuntu-latest
+
+    # Approval comes from the selected GitHub Environment.
+    # Configure required reviewers on BOTH dev and prod.
+    environment:
+      name: ${{ inputs.environment }}
+
     permissions:
       id-token: write
       contents: read
-    environment:
-      name: ${{ needs.deployment-config.outputs.infra_env }}  # Routes to 'dev' or 'prod' environment for approval
+
     steps:
-      - name: Checkout code
+
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Display infrastructure destruction parameters
-        run: |
-          echo "🔥 Infrastructure Destruction"
-          echo "Environment: ${{ needs.deployment-config.outputs.infra_env }}"
-          echo "Action: destroy"
-          echo "Terraform Version: ${{ env.TERRAFORM_VERSION }}"
-          echo ""
-          echo "⚠️  WARNING: This will DESTROY all infrastructure in ${{ needs.deployment-config.outputs.infra_env }}"
-          echo "✅ Approval GRANTED by GitHub Environment: ${{ needs.deployment-config.outputs.infra_env }}"
-
-      - name: Destroy infrastructure
-        uses: ./.github/actions/deploy-infrastructure/
+      - name: Terraform Apply
+        uses: ./.github/actions/deploy-infrastructure
         with:
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws-region: ${{ env.AWS_REGION }}
           terraform-version: ${{ env.TERRAFORM_VERSION }}
-          environment: ${{ needs.deployment-config.outputs.infra_env }}
-          terraform-dir: 'terraform/environments'
-          tfvars-file: 'terraform/environments/${{ needs.deployment-config.outputs.infra_env }}/terraform.tfvars'
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          state-bucket: ${{ secrets.TERRAFORM_STATE_BUCKET }}
-          state-key: 'microservices/${{ needs.deployment-config.outputs.infra_env }}/terraform.tfstate'
-          action: 'destroy'
+          environment: ${{ inputs.environment }}
+          terraform-dir: terraform/environments
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
+          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+          action: apply
 
-  # ============================================================================
-  # STAGE 6: DEPLOY APPLICATION
-  # ============================================================================
-  deploy-application:
-    needs: [deployment-config, build-images, deploy-infrastructure, security-scan]
-    if: ${{ needs.deployment-config.outputs.deploy_app == 'true' && (github.event.inputs.deploy_infrastructure == 'false' || github.event.inputs.infra_action == 'apply' || success()) }}
+
+  # ==========================================================
+  # 4. DEPLOY APPLICATION
+  # ==========================================================
+
+  deploy:
+    name: Deploy Application
+    needs:
+      - build
+      - terraform-apply
+
+    if: >-
+      ${{ inputs.deploy_application &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
+
     runs-on: ubuntu-latest
+
     permissions:
       id-token: write
       contents: read
-    environment:
-      name: ${{ needs.deployment-config.outputs.app_env == 'prod' && 'prod' || '' }}
-    steps:
-      - name: Display application deployment parameters
-        run: |
-          echo "🚀 Application Deployment"
-          echo "Environment: ${{ needs.deployment-config.outputs.app_env }}"
-          echo "Cluster: ${{ needs.deployment-config.outputs.app_env == 'dev' && needs.deployment-config.outputs.cluster_name_dev || needs.deployment-config.outputs.cluster_name_prod }}"
-          echo "User Service Tag: ${{ needs.deployment-config.outputs.user_tag }}"
-          echo "Order Service Tag: ${{ needs.deployment-config.outputs.order_tag }}"
-          echo "Helm Timeout: ${{ github.event.inputs.helm_timeout }}"
-          echo "Wait for Rollout: ${{ github.event.inputs.wait_for_rollout }}"
 
-      - name: Deploy to dev EKS
-        if: ${{ needs.deployment-config.outputs.app_env == 'dev' }}
-        uses: ./.github/actions/deploy-application/
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to EKS
+        uses: ./.github/actions/deploy-application
         with:
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws-region: ${{ env.AWS_REGION }}
-          cluster-name: ${{ needs.deployment-config.outputs.cluster_name_dev }}
-          environment: dev
-          helm-chart-path: ${{ env.HELM_CHART_PATH }}
-          helm-release-name: ${{ env.HELM_RELEASE_NAME }}
-          helm-namespace: ${{ env.HELM_NAMESPACE }}
-          helm-values-file: ${{ needs.deployment-config.outputs.helm_values_dev }}
-          user-service-image-tag: ${{ needs.deployment-config.outputs.user_tag }}
-          order-service-image-tag: ${{ needs.deployment-config.outputs.order_tag }}
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          helm-timeout: ${{ github.event.inputs.helm_timeout }}
-          wait-for-rollout: ${{ github.event.inputs.wait_for_rollout }}
-
-      - name: Deploy to prod EKS
-        if: ${{ needs.deployment-config.outputs.app_env == 'prod' }}
-        uses: ./.github/actions/deploy-application/
-        with:
-          aws-account-id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws-region: ${{ env.AWS_REGION }}
-          cluster-name: ${{ needs.deployment-config.outputs.cluster_name_prod }}
-          environment: prod
-          helm-chart-path: ${{ env.HELM_CHART_PATH }}
-          helm-release-name: ${{ env.HELM_RELEASE_NAME }}
-          helm-namespace: ${{ env.HELM_NAMESPACE }}
-          helm-values-file: ${{ needs.deployment-config.outputs.helm_values_prod }}
-          user-service-image-tag: ${{ needs.deployment-config.outputs.user_tag }}
-          order-service-image-tag: ${{ needs.deployment-config.outputs.order_tag }}
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          helm-timeout: ${{ github.event.inputs.helm_timeout }}
-          wait-for-rollout: ${{ github.event.inputs.wait_for_rollout }}
-
-  # ============================================================================
-  # FINAL: SUMMARY & NOTIFICATIONS
-  # ============================================================================
-  summary:
-    needs: [deployment-config, quality-checks, test, terraform-plan, build-images, security-scan, deploy-infrastructure, deploy-application]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Generate workflow summary
-        run: |
-          echo "## 🎯 CI/CD Orchestration Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
-          echo "- Build Images: ${{ needs.deployment-config.outputs.build_images }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Deploy Infrastructure: ${{ needs.deployment-config.outputs.deploy_infra }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Deploy Application: ${{ needs.deployment-config.outputs.deploy_app }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "⚠️ **REVIEW PLAN BEFORE APPROVAL** - See details below" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "### Stages Executed" >> $GITHUB_STEP_SUMMARY
-          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Quality Checks | ${{ needs.quality-checks.result }} ✓ |" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | ${{ needs.test.result }} ✓ |" >> $GITHUB_STEP_SUMMARY
-          echo "| Terraform Plan | ${{ needs.terraform-plan.result }} ✓ |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build Images | ${{ needs.build-images.result }} ${{ needs.deployment-config.outputs.build_images == 'true' && '✓' || '⊘' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Security Scan | ${{ needs.security-scan.result }} ${{ github.event.inputs.run_security_scan != 'false' && '✓' || '⊘' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deploy Infrastructure | ${{ needs.deploy-infrastructure.result }} ${{ needs.deployment-config.outputs.deploy_infra == 'true' && '✓' || '⊘' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deploy Application | ${{ needs.deploy-application.result }} ${{ needs.deployment-config.outputs.deploy_app == 'true' && '✓' || '⊘' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "### Terraform Plan Changes" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | Add | Update | Delete | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------------|-----|--------|--------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| dev | ${{ needs.terraform-plan.outputs.dev-adds }} | ${{ needs.terraform-plan.outputs.dev-updates }} | ${{ needs.terraform-plan.outputs.dev-deletes }} | ${{ needs.terraform-plan.outputs.dev-status }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ "${{ needs.terraform-plan.outputs.dev-adds }}" != "0" ] && [ -n "${{ needs.terraform-plan.outputs.dev-adds-list }}" ]; then
-            echo "#### 🟢 Resources to CREATE (${{ needs.terraform-plan.outputs.dev-adds }}):" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "${{ needs.terraform-plan.outputs.dev-adds-list }}" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if [ "${{ needs.terraform-plan.outputs.dev-updates }}" != "0" ] && [ -n "${{ needs.terraform-plan.outputs.dev-updates-list }}" ]; then
-            echo "#### 🟡 Resources to UPDATE (${{ needs.terraform-plan.outputs.dev-updates }}):" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "${{ needs.terraform-plan.outputs.dev-updates-list }}" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "> **To see detailed field changes**, check the 'Terraform Plan - dev' job logs for full attribute diff" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          if [ "${{ needs.terraform-plan.outputs.dev-deletes }}" != "0" ] && [ -n "${{ needs.terraform-plan.outputs.dev-deletes-list }}" ]; then
-            echo "#### 🔴 Resources to DELETE (${{ needs.terraform-plan.outputs.dev-deletes }}):" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "${{ needs.terraform-plan.outputs.dev-deletes-list }}" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-
-          echo "### Environment Details" >> $GITHUB_STEP_SUMMARY
-          echo "- User Service Tag: ${{ needs.deployment-config.outputs.user_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Order Service Tag: ${{ needs.deployment-config.outputs.order_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Infrastructure Env: ${{ needs.deployment-config.outputs.infra_env }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Application Env: ${{ needs.deployment-config.outputs.app_env }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Helm Timeout: ${{ github.event.inputs.helm_timeout }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          echo "### Run Details" >> $GITHUB_STEP_SUMMARY
-          echo "- **Workflow**: CI/CD Orchestration" >> $GITHUB_STEP_SUMMARY
-          echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch**: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          OVERALL=${{ job.status }}
-          [ "$OVERALL" = "success" ] && EMOJI="✅" || EMOJI="❌"
-          echo "$EMOJI **Overall Status**: $OVERALL" >> $GITHUB_STEP_SUMMARY
-
-      - name: Workflow completed
-        run: |
-          echo "=========================================="
-          echo "✅ CI/CD Orchestration Workflow Completed"
-          echo "=========================================="
-          echo ""
-          echo "Build Images: ${{ needs.deployment-config.outputs.build_images }}"
-          echo "Deploy Infrastructure: ${{ needs.deployment-config.outputs.deploy_infra }}"
-          echo "Deploy Application: ${{ needs.deployment-config.outputs.deploy_app }}"
-          echo ""
-          echo "Overall Status: ${{ job.status }}"
-
-  # ============================================================================
-  # ERROR HANDLING
-  # ============================================================================
-  on-failure:
-    if: failure()
-    needs: [summary]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Notify of failure
-        run: |
-          echo "❌ CI/CD Orchestration Failed"
-          echo "Check GitHub Actions logs for details"
-          echo "Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          cluster-name: ${{ inputs.environment == 'prod' && 'microservices-prod-eks' || 'microservices-dev-eks' }}
+          environment: ${{ inputs.environment }}
+          helm-chart-path: ./helm
+          helm-release-name: microservices-app
+          helm-namespace: default
+          helm-values-file: ${{ inputs.environment == 'prod' && 'helm/values-prod.yaml' || 'helm/values-dev.yaml' }}
+          user-service-image-tag: ${{ inputs.user_service_tag || github.sha }}
+          order-service-image-tag: ${{ inputs.order_service_tag || github.sha }}
+          aws-role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          helm-timeout: 10m
+          wait-for-rollout: true

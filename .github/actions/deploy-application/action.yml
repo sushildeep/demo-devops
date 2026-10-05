@@ -1,66 +1,78 @@
-name: 'Deploy Application with Helm'
-description: 'Deploy microservices to EKS cluster using Helm'
+name: Deploy Application with Helm
+description: Deploy microservices to EKS using Helm and GitHub OIDC
 
 inputs:
-  aws-account-id:
-    description: 'AWS Account ID'
-    required: true
   aws-region:
-    description: 'AWS Region'
-    required: true
-    default: 'us-east-1'
+    description: AWS Region
+    required: false
+    default: us-east-1
+
   cluster-name:
-    description: 'EKS cluster name'
+    description: EKS cluster name
     required: true
+
   environment:
-    description: 'Environment (dev, prod)'
+    description: Deployment environment
     required: true
+
   helm-chart-path:
-    description: 'Path to Helm chart'
+    description: Helm chart path
     required: false
-    default: './helm'
+    default: ./helm
+
   helm-release-name:
-    description: 'Helm release name'
+    description: Helm release name
     required: false
-    default: 'microservices-app'
+    default: microservices-app
+
   helm-namespace:
-    description: 'Kubernetes namespace'
+    description: Kubernetes namespace
     required: false
-    default: 'default'
+    default: default
+
   helm-values-file:
-    description: 'Path to values file (e.g., helm/values-dev.yaml)'
+    description: Helm values file
     required: true
+
   user-service-image-tag:
-    description: 'User service image tag'
+    description: User service image tag
     required: true
+
   order-service-image-tag:
-    description: 'Order service image tag'
+    description: Order service image tag
     required: true
+
   aws-role-to-assume:
-    description: 'AWS IAM role to assume for OIDC'
+    description: AWS IAM role ARN for GitHub OIDC
     required: true
+
   helm-timeout:
-    description: 'Helm operation timeout'
+    description: Helm deployment timeout
     required: false
-    default: '10m'
+    default: 10m
+
   wait-for-rollout:
-    description: 'Wait for rollout to complete'
+    description: Wait for Kubernetes rollout
     required: false
-    default: 'true'
+    default: true
 
 outputs:
   deployment-status:
-    description: 'Deployment status'
+    description: Deployment status
     value: ${{ steps.deploy.outputs.status }}
+
   helm-release-version:
-    description: 'Helm release version'
+    description: Helm release revision
     value: ${{ steps.deploy.outputs.release-version }}
 
 runs:
-  using: 'composite'
+  using: composite
+
   steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+
+    # ------------------------------------------------------------
+    # AWS OIDC
+    # ------------------------------------------------------------
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -68,188 +80,248 @@ runs:
         role-to-assume: ${{ inputs.aws-role-to-assume }}
         aws-region: ${{ inputs.aws-region }}
 
-    - name: Update kubeconfig
+    # ------------------------------------------------------------
+    # Verify AWS
+    # ------------------------------------------------------------
+
+    - name: Verify AWS identity
       shell: bash
       run: |
-        echo "Updating kubeconfig for cluster: ${{ inputs.cluster-name }}"
-        aws eks update-kubeconfig \
-          --name ${{ inputs.cluster-name }} \
-          --region ${{ inputs.aws-region }}
+        set -e
 
-        echo "✅ Kubeconfig updated"
+        echo "AWS identity:"
+        aws sts get-caller-identity
+
+    # ------------------------------------------------------------
+    # Get AWS Account ID
+    # ------------------------------------------------------------
+
+    - name: Get AWS account ID
+      id: aws-account
+      shell: bash
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity \
+          --query Account \
+          --output text)
+
+        echo "account-id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+
+    # ------------------------------------------------------------
+    # Configure Kubernetes
+    # ------------------------------------------------------------
+
+    - name: Configure kubectl
+      shell: bash
+      run: |
+        set -e
+
+        echo "Configuring kubeconfig..."
+        echo "Environment: ${{ inputs.environment }}"
+        echo "Cluster: ${{ inputs.cluster-name }}"
+
+        aws eks update-kubeconfig \
+          --region "${{ inputs.aws-region }}" \
+          --name "${{ inputs.cluster-name }}"
+
         echo ""
-        echo "Cluster Info:"
+        echo "Checking cluster access..."
+
         kubectl cluster-info
-        echo ""
-        echo "Nodes:"
         kubectl get nodes
 
+    # ------------------------------------------------------------
+    # Setup Helm
+    # ------------------------------------------------------------
+
     - name: Setup Helm
-      uses: azure/setup-helm@v3
+      uses: azure/setup-helm@v4
       with:
-        version: 'latest'
+        version: latest
+
+    # ------------------------------------------------------------
+    # Create namespace
+    # ------------------------------------------------------------
 
     - name: Create namespace
       shell: bash
       run: |
-        echo "Creating namespace: ${{ inputs.helm-namespace }}"
-        kubectl create namespace ${{ inputs.helm-namespace }} --dry-run=client -o yaml | kubectl apply -f -
-        echo "✅ Namespace ready"
+        kubectl create namespace "${{ inputs.helm-namespace }}" \
+          --dry-run=client \
+          -o yaml | \
+          kubectl apply -f -
 
-    - name: Verify database credentials secret
-      shell: bash
-      run: |
-        echo "Checking database credentials secret..."
-        if kubectl get secret db-credentials -n ${{ inputs.helm-namespace }} &> /dev/null; then
-          echo "✅ Database credentials secret found"
-        else
-          echo "⚠️  Database credentials secret not found"
-          echo "Please create it with: kubectl create secret generic db-credentials --from-literal=password=YOUR_PASSWORD"
-        fi
+    # ------------------------------------------------------------
+    # Validate Helm
+    # ------------------------------------------------------------
 
     - name: Validate Helm chart
       shell: bash
       run: |
-        echo "Validating Helm chart..."
-        helm lint ${{ inputs.helm-chart-path }}
-        echo "✅ Helm chart validation passed"
+        helm lint "${{ inputs.helm-chart-path}"
 
-    - name: Add Helm repositories
+    # ------------------------------------------------------------
+    # Helm dry run
+    # ------------------------------------------------------------
+
+    - name: Helm dry run
       shell: bash
       run: |
-        echo "Adding required Helm repositories..."
-        helm repo add eks https://aws.github.io/eks-charts || true
-        helm repo update
-        echo "✅ Helm repositories updated"
+        set -e
 
-    - name: Dry-run Helm deployment
-      shell: bash
-      run: |
-        echo "Performing Helm dry-run..."
-        helm upgrade --install ${{ inputs.helm-release-name }} ${{ inputs.helm-chart-path }} \
-          --namespace ${{ inputs.helm-namespace }} \
-          --values ${{ inputs.helm-values-file }} \
-          --set image.registry=${{ inputs.aws-account-id }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com \
-          --set image.user_service.tag=${{ inputs.user-service-image-tag }} \
-          --set image.order_service.tag=${{ inputs.order-service-image-tag }} \
-          --timeout ${{ inputs.helm-timeout }} \
+        ACCOUNT_ID="${{ steps.aws-account.outputs.account-id }}"
+
+        helm upgrade --install \
+          "${{ inputs.helm-release-name }}" \
+          "${{ inputs.helm-chart-path }}" \
+          --namespace "${{ inputs.helm-namespace }}" \
+          --values "${{ inputs.helm-values-file }}" \
+          --set image.registry="${ACCOUNT_ID}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com" \
+          --set image.user_service.tag="${{ inputs.user-service-image-tag }}" \
+          --set image.order_service.tag="${{ inputs.order-service-image-tag }}" \
+          --timeout "${{ inputs.helm-timeout }}" \
           --dry-run \
-          --debug > /tmp/helm-dry-run.yaml
+          --debug \
+          > /tmp/helm-dry-run.yaml
 
-        echo "✅ Helm dry-run successful"
-        echo ""
-        echo "Resources to be deployed:"
-        grep "^kind:" /tmp/helm-dry-run.yaml | sort | uniq -c
+        echo "Helm dry run successful."
+
+    # ------------------------------------------------------------
+    # Deploy
+    # ------------------------------------------------------------
 
     - name: Deploy with Helm
       id: deploy
       shell: bash
       run: |
-        echo "Deploying with Helm..."
-        helm upgrade --install ${{ inputs.helm-release-name }} ${{ inputs.helm-chart-path }} \
-          --namespace ${{ inputs.helm-namespace }} \
-          --values ${{ inputs.helm-values-file }} \
-          --set image.registry=${{ inputs.aws-account-id }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com \
-          --set image.user_service.tag=${{ inputs.user-service-image-tag }} \
-          --set image.order_service.tag=${{ inputs.order-service-image-tag }} \
-          --timeout ${{ inputs.helm-timeout }} \
+        set -e
+
+        ACCOUNT_ID="${{ steps.aws-account.outputs.account-id }}"
+
+        echo "Deploying application..."
+        echo "Environment: ${{ inputs.environment }}"
+        echo "Cluster: ${{ inputs.cluster-name }}"
+
+        helm upgrade --install \
+          "${{ inputs.helm-release-name }}" \
+          "${{ inputs.helm-chart-path }}" \
+          --namespace "${{ inputs.helm-namespace }}" \
+          --values "${{ inputs.helm-values-file }}" \
+          --set image.registry="${ACCOUNT_ID}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com" \
+          --set image.user_service.tag="${{ inputs.user-service-image-tag }}" \
+          --set image.order_service.tag="${{ inputs.order-service-image-tag }}" \
+          --timeout "${{ inputs.helm-timeout }}" \
           --wait
 
-        RELEASE_VERSION=$(helm list -n ${{ inputs.helm-namespace }} -o json | \
+        RELEASE_VERSION=$(helm list \
+          -n "${{ inputs.helm-namespace }}" \
+          -o json | \
           jq -r '.[] | select(.name=="${{ inputs.helm-release-name }}") | .revision')
 
-        echo "✅ Helm deployment completed"
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "release-version=$RELEASE_VERSION" >> $GITHUB_OUTPUT
+        echo "status=success" >> "$GITHUB_OUTPUT"
+        echo "release-version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
 
-    - name: Wait for rollout
+        echo ""
+        echo "Helm deployment successful."
+        echo "Release: ${{ inputs.helm-release-name }}"
+        echo "Revision: $RELEASE_VERSION"
+
+    # ------------------------------------------------------------
+    # Rollout verification
+    # ------------------------------------------------------------
+
+    - name: Verify rollout
       if: inputs.wait-for-rollout == 'true'
       shell: bash
       run: |
-        echo "Waiting for deployment rollout..."
-        echo ""
+        set -e
 
-        # Wait for user-service deployment
-        echo "Waiting for user-service deployment..."
-        kubectl rollout status deployment/microservices-app-user-service \
-          -n ${{ inputs.helm-namespace }} \
-          --timeout=5m || EXIT_CODE=$?
+        echo "Checking application rollouts..."
 
-        if [ "${EXIT_CODE:-0}" -eq 0 ]; then
-          echo "✅ User-service deployment successful"
-        else
-          echo "⚠️  User-service deployment status check completed"
-        fi
+        kubectl rollout status \
+          deployment/microservices-app-user-service \
+          -n "${{ inputs.helm-namespace }}" \
+          --timeout=5m
 
-        echo ""
+        kubectl rollout status \
+          deployment/microservices-app-order-service \
+          -n "${{ inputs.helm-namespace }}" \
+          --timeout=5m
 
-        # Wait for order-service deployment
-        echo "Waiting for order-service deployment..."
-        kubectl rollout status deployment/microservices-app-order-service \
-          -n ${{ inputs.helm-namespace }} \
-          --timeout=5m || EXIT_CODE=$?
+        echo "All deployments are healthy."
 
-        if [ "${EXIT_CODE:-0}" -eq 0 ]; then
-          echo "✅ Order-service deployment successful"
-        else
-          echo "⚠️  Order-service deployment status check completed"
-        fi
+    # ------------------------------------------------------------
+    # Deployment status
+    # ------------------------------------------------------------
 
-    - name: Check deployment status
+    - name: Deployment status
       shell: bash
       run: |
-        echo "📋 Deployment Status:"
+        echo "=========================================="
+        echo "Deployment Summary"
+        echo "=========================================="
+        echo "Environment : ${{ inputs.environment }}"
+        echo "Cluster     : ${{ inputs.cluster-name }}"
+        echo "Release     : ${{ inputs.helm-release-name }}"
+        echo "Namespace   : ${{ inputs.helm-namespace }}"
+        echo "User image  : ${{ inputs.user-service-image-tag }}"
+        echo "Order image : ${{ inputs.order-service-image-tag }}"
         echo ""
-        echo "Helm Release:"
-        helm status ${{ inputs.helm-release-name }} -n ${{ inputs.helm-namespace }}
-        echo ""
+
         echo "Pods:"
-        kubectl get pods -n ${{ inputs.helm-namespace }} -l app.kubernetes.io/instance=${{ inputs.helm-release-name }}
+        kubectl get pods \
+          -n "${{ inputs.helm-namespace }}"
+
         echo ""
         echo "Services:"
-        kubectl get svc -n ${{ inputs.helm-namespace }} -l app.kubernetes.io/instance=${{ inputs.helm-release-name }}
-        echo ""
-        echo "Ingress:"
-        kubectl get ingress -n ${{ inputs.helm-namespace }}
+        kubectl get svc \
+          -n "${{ inputs.helm-namespace }}"
 
-    - name: Get pod logs on failure
+    # ------------------------------------------------------------
+    # Failure diagnostics
+    # ------------------------------------------------------------
+
+    - name: Collect failure diagnostics
       if: failure()
       shell: bash
       continue-on-error: true
       run: |
-        echo "❌ Deployment failed. Retrieving pod logs..."
+        echo "Deployment failed."
         echo ""
+        echo "Pods:"
+        kubectl get pods \
+          -n "${{ inputs.helm-namespace }}" \
+          -o wide || true
 
-        PODS=$(kubectl get pods -n ${{ inputs.helm-namespace }} -l app.kubernetes.io/instance=${{ inputs.helm-release-name }} -o name)
+        echo ""
+        echo "Recent events:"
+        kubectl get events \
+          -n "${{ inputs.helm-namespace }}" \
+          --sort-by='.lastTimestamp' || true
 
-        for POD in $PODS; do
-          echo "Logs for $POD:"
-          kubectl logs $POD -n ${{ inputs.helm-namespace }} --tail=50 || true
-          echo ""
+        echo ""
+        echo "Pod logs:"
+
+        for POD in $(kubectl get pods \
+          -n "${{ inputs.helm-namespace }}" \
+          -o name); do
+
+          echo "=========================================="
+          echo "$POD"
+          echo "=========================================="
+
+          kubectl logs "$POD" \
+            -n "${{ inputs.helm-namespace }}" \
+            --tail=50 || true
         done
 
-        echo "Deployment events:"
-        kubectl get events -n ${{ inputs.helm-namespace }} --sort-by='.lastTimestamp' || true
+    # ------------------------------------------------------------
+    # Upload Helm manifest
+    # ------------------------------------------------------------
 
-    - name: Upload deployment manifest
+    - name: Upload Helm manifest
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: helm-manifest-${{ inputs.environment }}
         path: /tmp/helm-dry-run.yaml
         retention-days: 7
-
-    - name: Summary
-      if: always()
-      shell: bash
-      run: |
-        echo "🎯 Deployment Summary:"
-        echo "  Environment: ${{ inputs.environment }}"
-        echo "  Cluster: ${{ inputs.cluster-name }}"
-        echo "  Release: ${{ inputs.helm-release-name }}"
-        echo "  Namespace: ${{ inputs.helm-namespace }}"
-        echo "  User Service Tag: ${{ inputs.user-service-image-tag }}"
-        echo "  Order Service Tag: ${{ inputs.order-service-image-tag }}"
-        echo "  Release Version: ${{ steps.deploy.outputs.release-version }}"
-        echo ""
-        echo "✅ Deployment action completed"

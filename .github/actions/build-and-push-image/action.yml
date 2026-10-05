@@ -1,48 +1,61 @@
-name: 'Build and Push Docker Image to ECR'
-description: 'Build Docker image and push to AWS ECR'
+name: Build and Push Docker Image to ECR
+description: Build Docker image and push it to AWS ECR using GitHub OIDC
 
 inputs:
-  aws-account-id:
-    description: 'AWS Account ID'
-    required: true
   aws-region:
-    description: 'AWS Region'
-    required: true
-    default: 'us-east-1'
+    description: AWS Region
+    required: false
+    default: us-east-1
+
   service-name:
-    description: 'Service name (e.g., user-service, order-service)'
+    description: Service name
     required: true
+
   dockerfile-path:
-    description: 'Path to Dockerfile directory'
+    description: Path to Dockerfile directory
     required: true
+
   image-tag:
-    description: 'Image tag (commit SHA)'
+    description: Docker image tag
     required: true
+
   aws-role-to-assume:
-    description: 'AWS IAM role to assume for OIDC'
+    description: AWS IAM role ARN to assume using GitHub OIDC
     required: true
+
   environment-tag:
-    description: 'Environment tag (latest, develop, etc.)'
+    description: Environment image tag
     required: false
-    default: 'latest'
+    default: latest
+
   ecr-repository:
-    description: 'ECR repository name (dev, prod)'
-    required: false
-    default: 'dev'
+    description: ECR repository name
+    required: true
 
 outputs:
   image-uri:
-    description: 'Full image URI pushed to ECR'
+    description: Full Docker image URI
     value: ${{ steps.build-push.outputs.image-uri }}
-  image-digest:
-    description: 'Image digest'
-    value: ${{ steps.build-push.outputs.image-digest }}
+
+  image-tag:
+    description: Docker image tag
+    value: ${{ steps.build-push.outputs.image-tag }}
 
 runs:
-  using: 'composite'
+  using: composite
+
   steps:
+
+    # ------------------------------------------------------------
+    # Checkout
+    # ------------------------------------------------------------
+
     - name: Checkout code
       uses: actions/checkout@v4
+
+    # ------------------------------------------------------------
+    # AWS OIDC
+    # ------------------------------------------------------------
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -50,9 +63,27 @@ runs:
         role-to-assume: ${{ inputs.aws-role-to-assume }}
         aws-region: ${{ inputs.aws-region }}
 
+    # ------------------------------------------------------------
+    # Verify AWS
+    # ------------------------------------------------------------
+
+    - name: Verify AWS identity
+      shell: bash
+      run: |
+        echo "AWS Identity:"
+        aws sts get-caller-identity
+
+    # ------------------------------------------------------------
+    # ECR Login
+    # ------------------------------------------------------------
+
     - name: Login to Amazon ECR
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
+
+    # ------------------------------------------------------------
+    # Build and Push
+    # ------------------------------------------------------------
 
     - name: Build and push Docker image
       id: build-push
@@ -64,32 +95,61 @@ runs:
         IMAGE_TAG: ${{ inputs.image-tag }}
         ENV_TAG: ${{ inputs.environment-tag }}
       run: |
-        # Build Docker image with service-specific tags
+        set -e
+
+        IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY/$SERVICE_NAME"
+
+        echo "=========================================="
+        echo "Building Docker Image"
+        echo "=========================================="
+        echo "Service      : $SERVICE_NAME"
+        echo "Repository   : $ECR_REPOSITORY"
+        echo "Image Tag    : $IMAGE_TAG"
+        echo "Environment  : $ENV_TAG"
+        echo "Registry     : $ECR_REGISTRY"
+        echo ""
+
         docker build \
-          -t $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME \
-          -t $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME-$IMAGE_TAG \
-          -t $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME-$ENV_TAG \
-          ${{ inputs.dockerfile-path }}
+          -t "$IMAGE_URI:$SERVICE_NAME" \
+          -t "$IMAGE_URI:$SERVICE_NAME-$IMAGE_TAG" \
+          -t "$IMAGE_URI:$SERVICE_NAME-$ENV_TAG" \
+          "${{ inputs.dockerfile-path }}"
 
-        # Push images to ECR
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME-$IMAGE_TAG
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME-$ENV_TAG
+        echo ""
+        echo "Pushing images..."
 
-        # Get image digest
-        IMAGE_DIGEST=$(docker images --no-trunc --quiet $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME)
+        docker push "$IMAGE_URI:$SERVICE_NAME"
+        docker push "$IMAGE_URI:$SERVICE_NAME-$IMAGE_TAG"
+        docker push "$IMAGE_URI:$SERVICE_NAME-$ENV_TAG"
 
-        # Output image URI
-        echo "image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME" >> $GITHUB_OUTPUT
-        echo "image-digest=$IMAGE_DIGEST" >> $GITHUB_OUTPUT
+        echo ""
+        echo "=========================================="
+        echo "Docker image pushed successfully"
+        echo "=========================================="
 
-        # Print summary
-        echo "✅ Image built and pushed successfully"
-        echo "📦 Image URI: $ECR_REGISTRY/$ECR_REPOSITORY:$SERVICE_NAME"
-        echo "🏷️  Tags: $SERVICE_NAME, $SERVICE_NAME-$IMAGE_TAG, $SERVICE_NAME-$ENV_TAG"
+        echo "image-uri=$IMAGE_URI:$SERVICE_NAME" >> "$GITHUB_OUTPUT"
+        echo "image-tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
-    - name: Print image details
+        echo ""
+        echo "Image URI:"
+        echo "$IMAGE_URI:$SERVICE_NAME"
+
+        echo ""
+        echo "Tags:"
+        echo "$SERVICE_NAME"
+        echo "$SERVICE_NAME-$IMAGE_TAG"
+        echo "$SERVICE_NAME-$ENV_TAG"
+
+    # ------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------
+
+    - name: Image summary
       shell: bash
       run: |
-        echo "Image URI: ${{ steps.build-push.outputs.image-uri }}"
-        echo "Image Digest: ${{ steps.build-push.outputs.image-digest }}"
+        echo "=========================================="
+        echo "ECR Deployment Summary"
+        echo "=========================================="
+        echo "Image: ${{ steps.build-push.outputs.image-uri }}"
+        echo "Tag:   ${{ steps.build-push.outputs.image-tag }}"
+        echo "=========================================="
