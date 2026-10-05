@@ -257,8 +257,6 @@ jobs:
       matrix:
         environment: [dev, prod]
       fail-fast: false
-    environment:
-      name: ${{ matrix.environment }}
     outputs:
       dev-adds: ${{ steps.parse_plan.outputs.resources_to_add }}
       dev-updates: ${{ steps.parse_plan.outputs.resources_to_update }}

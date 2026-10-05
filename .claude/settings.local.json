@@ -5,7 +5,9 @@
       "Bash(bash /tmp/repo_audit.sh)",
       "Bash(terraform fmt *)",
       "Bash(terraform init *)",
-      "Bash(grep -iE \"\\\\.\\(docx|doc|pdf|txt|md\\)$\")"
+      "Bash(grep -iE \"\\\\.\\(docx|doc|pdf|txt|md\\)$\")",
+      "Bash(aws sts *)",
+      "Bash(aws iam *)"
     ]
   }
 }
