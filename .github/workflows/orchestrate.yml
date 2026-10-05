@@ -257,6 +257,8 @@ jobs:
       matrix:
         environment: [dev, prod]
       fail-fast: false
+    environment:
+      name: ${{ matrix.environment }}
     outputs:
       dev-adds: ${{ steps.parse_plan.outputs.resources_to_add }}
       dev-updates: ${{ steps.parse_plan.outputs.resources_to_update }}
@@ -387,6 +389,8 @@ jobs:
     needs: [deployment-config]
     if: ${{ needs.deployment-config.outputs.build_images == 'true' }}
     runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.deployment-config.outputs.app_env }}
     permissions:
       id-token: write
       contents: read
@@ -436,6 +440,8 @@ jobs:
     needs: [deployment-config, build-images]
     if: ${{ github.event.inputs.run_security_scan != 'false' && needs.deployment-config.outputs.build_images == 'true' }}
     runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.deployment-config.outputs.app_env }}
     permissions:
       id-token: write
       contents: read
