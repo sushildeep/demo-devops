@@ -10,7 +10,7 @@ inputs:
   terraform-version:
     description: Terraform version
     required: false
-    default: "1.5.0"
+    default: "1.5.0
 
   environment:
     description: Environment name
@@ -42,7 +42,7 @@ inputs:
     required: true
 
   action:
-    description: Terraform action
+    description: Terraform action - plan, apply, or destroy
     required: false
     default: plan
 
@@ -51,18 +51,19 @@ outputs:
     description: Whether Terraform plan contains changes
     value: ${{ steps.plan.outputs.plan-exists }}
 
-  apply-summary:
+  operation-summary:
     description: Terraform operation summary
-    value: ${{ steps.apply.outputs.summary }}
+    value: ${{ steps.apply.outputs.summary || steps.destroy.outputs.summary }}
+
 
 runs:
   using: composite
 
   steps:
 
-    # ----------------------------------------------------------
+    # ==========================================================
     # AWS OIDC
-    # ----------------------------------------------------------
+    # ==========================================================
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -70,30 +71,36 @@ runs:
         role-to-assume: ${{ inputs.aws-role-to-assume }}
         aws-region: ${{ inputs.aws-region }}
 
-    # ----------------------------------------------------------
+
+    # ==========================================================
     # Verify AWS
-    # ----------------------------------------------------------
+    # ==========================================================
 
     - name: Verify AWS identity
       shell: bash
       run: |
         set -e
 
-        echo "AWS Identity:"
+        echo "=========================================="
+        echo "AWS Identity"
+        echo "=========================================="
+
         aws sts get-caller-identity
 
-    # ----------------------------------------------------------
+
+    # ==========================================================
     # Setup Terraform
-    # ----------------------------------------------------------
+    # ==========================================================
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: ${{ inputs.terraform-version }}
 
-    # ----------------------------------------------------------
-    # Format
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Format
+    # ==========================================================
 
     - name: Terraform Format Check
       shell: bash
@@ -101,19 +108,26 @@ runs:
       run: |
         set -e
 
+        echo "Checking Terraform formatting..."
+
         terraform fmt -check -recursive
 
         echo "Terraform format check passed."
 
-    # ----------------------------------------------------------
-    # Init
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Init
+    # ==========================================================
 
     - name: Terraform Init
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
         set -e
+
+        echo "=========================================="
+        echo "Terraform Init"
+        echo "=========================================="
 
         terraform init \
           -backend-config="bucket=${{ inputs.state-bucket }}" \
@@ -122,11 +136,13 @@ runs:
           -backend-config="encrypt=true" \
           -backend-config="dynamodb_table=${{ inputs.state-lock-table }}"
 
-        echo "Terraform initialized."
+        echo ""
+        echo "Terraform initialized successfully."
 
-    # ----------------------------------------------------------
-    # Validate
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Validate
+    # ==========================================================
 
     - name: Terraform Validate
       shell: bash
@@ -134,13 +150,23 @@ runs:
       run: |
         set -e
 
+        echo "Validating Terraform configuration..."
+
         terraform validate
 
         echo "Terraform validation passed."
 
-    # ----------------------------------------------------------
-    # Plan
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Plan
+    #
+    # Runs for:
+    #   plan
+    #   apply
+    #
+    # Does NOT run for:
+    #   destroy
+    # ==========================================================
 
     - name: Terraform Plan
       id: plan
@@ -150,7 +176,11 @@ runs:
       run: |
         set +e
 
-        echo "Creating Terraform plan..."
+        echo "=========================================="
+        echo "Terraform Plan"
+        echo "=========================================="
+        echo "Environment: ${{ inputs.environment }}"
+        echo ""
 
         terraform plan \
           -var-file="${{ inputs.tfvars-file }}" \
@@ -160,21 +190,32 @@ runs:
         EXIT_CODE=$?
 
         if [ "$EXIT_CODE" -eq 0 ]; then
+
+          echo ""
           echo "No infrastructure changes."
+
           echo "plan-exists=false" >> "$GITHUB_OUTPUT"
 
         elif [ "$EXIT_CODE" -eq 2 ]; then
+
+          echo ""
           echo "Infrastructure changes detected."
+
           echo "plan-exists=true" >> "$GITHUB_OUTPUT"
 
         else
+
+          echo ""
           echo "Terraform plan failed."
+
           exit "$EXIT_CODE"
+
         fi
 
-    # ----------------------------------------------------------
-    # Upload Plan
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Upload Terraform Plan
+    # ==========================================================
 
     - name: Upload Terraform Plan
       if: |
@@ -187,9 +228,15 @@ runs:
         if-no-files-found: ignore
         retention-days: 7
 
-    # ----------------------------------------------------------
-    # Apply
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Apply
+    #
+    # Only runs when:
+    #   action = apply
+    #
+    # Environment approval is handled by ci.yml.
+    # ==========================================================
 
     - name: Terraform Apply
       id: apply
@@ -218,9 +265,12 @@ runs:
         echo "summary=Terraform infrastructure deployed successfully" \
           >> "$GITHUB_OUTPUT"
 
-    # ----------------------------------------------------------
+
+    # ==========================================================
     # Terraform Outputs
-    # ----------------------------------------------------------
+    #
+    # Only relevant after APPLY.
+    # ==========================================================
 
     - name: Terraform Outputs
       if: inputs.action == 'apply'
@@ -229,14 +279,18 @@ runs:
       run: |
         set -e
 
-        echo "Terraform Outputs:"
+        echo "=========================================="
+        echo "Terraform Outputs"
+        echo "=========================================="
+
         terraform output
 
         terraform output -json > terraform-outputs.json
 
-    # ----------------------------------------------------------
+
+    # ==========================================================
     # Upload Terraform Outputs
-    # ----------------------------------------------------------
+    # ==========================================================
 
     - name: Upload Terraform Outputs
       if: inputs.action == 'apply'
@@ -247,9 +301,17 @@ runs:
         if-no-files-found: ignore
         retention-days: 30
 
-    # ----------------------------------------------------------
-    # Destroy
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Destroy
+    #
+    # Only runs when:
+    #   action = destroy
+    #
+    # IMPORTANT:
+    # ci.yml must put this job behind the DEV/PROD
+    # GitHub Environment approval.
+    # ==========================================================
 
     - name: Terraform Destroy
       id: destroy
@@ -260,25 +322,38 @@ runs:
         set -e
 
         echo "=========================================="
-        echo "WARNING: Terraform Destroy"
+        echo "WARNING: TERRAFORM DESTROY"
         echo "=========================================="
         echo "Environment: ${{ inputs.environment }}"
         echo ""
+        echo "The following infrastructure will be destroyed:"
+        echo ""
 
-        terraform destroy \
-          -auto-approve \
-          -input=false \
-          -var-file="${{ inputs.tfvars-file }}"
+        terraform plan \
+          -destroy \
+          -var-file="${{ inputs.tfvars-file }}" \
+          -out=destroy.tfplan
 
         echo ""
-        echo "Terraform destroy completed."
+        echo "Destroy plan created."
+        echo ""
+        echo "Executing Terraform destroy..."
+
+        terraform apply \
+          -auto-approve \
+          -input=false \
+          destroy.tfplan
+
+        echo ""
+        echo "Terraform destroy completed successfully."
 
         echo "summary=Terraform infrastructure destroyed successfully" \
           >> "$GITHUB_OUTPUT"
 
-    # ----------------------------------------------------------
-    # Summary
-    # ----------------------------------------------------------
+
+    # ==========================================================
+    # Terraform Summary
+    # ==========================================================
 
     - name: Terraform Summary
       if: always()

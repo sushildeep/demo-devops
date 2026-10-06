@@ -44,6 +44,7 @@ on:
         options:
           - plan
           - apply
+          - destroy
         default: plan
 
       # ==========================================================
@@ -83,19 +84,21 @@ env:
 jobs:
 
   # ============================================================
-  # 1. BUILD
+  # 1. BUILD DEV
+  #
+  # DEV:
+  # Build → Push DEV
   #
   # NO APPROVAL
-  # NO AWS
-  # NO GITHUB ENVIRONMENT
-  #
-  # Build images and save them as GitHub artifacts.
   # ============================================================
 
-  build:
-    name: Build Docker Images
+  build-dev:
+    name: Build Docker Images - DEV
 
-    if: ${{ inputs.build_images }}
+    if: >-
+      ${{ inputs.environment == 'dev' &&
+      inputs.build_images &&
+      inputs.terraform_action != 'destroy' }}
 
     runs-on: ubuntu-latest
 
@@ -104,16 +107,12 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # Checkout
-      # --------------------------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v4
 
 
       # --------------------------------------------------------
-      # Build User Service
+      # Build user-service
       # --------------------------------------------------------
 
       - name: Build user-service
@@ -123,11 +122,11 @@ jobs:
           service-name: user-service
           dockerfile-path: ./services/user-service
           image-tag: ${{ inputs.user_service_tag || github.sha }}
-          environment-tag: ${{ inputs.environment }}
+          environment-tag: dev
 
 
       # --------------------------------------------------------
-      # Build Order Service
+      # Build order-service
       # --------------------------------------------------------
 
       - name: Build order-service
@@ -137,17 +136,17 @@ jobs:
           service-name: order-service
           dockerfile-path: ./services/order-service
           image-tag: ${{ inputs.order_service_tag || github.sha }}
-          environment-tag: ${{ inputs.environment }}
+          environment-tag: dev
 
 
       # --------------------------------------------------------
-      # Upload Docker Images
+      # Upload DEV images
       # --------------------------------------------------------
 
-      - name: Upload Docker images
+      - name: Upload DEV Docker images
         uses: actions/upload-artifact@v4
         with:
-          name: docker-images-${{ github.sha }}
+          name: docker-images-dev-${{ github.sha }}
           path: docker-images/
           retention-days: 1
 
@@ -156,26 +155,22 @@ jobs:
   # 2. PUSH DEV ECR
   #
   # NO APPROVAL
-  # NO ENVIRONMENT
   #
   # ECR repository:
   #   dev
-  #
-  # Images:
-  #   dev:user-service
-  #   dev:order-service
   # ============================================================
 
   push-dev:
     name: Push Images - DEV
 
     needs:
-      - build
+      - build-dev
 
     if: >-
       ${{ inputs.environment == 'dev' &&
       inputs.build_images &&
-      needs.build.result == 'success' }}
+      inputs.terraform_action != 'destroy' &&
+      needs.build-dev.result == 'success' }}
 
     runs-on: ubuntu-latest
 
@@ -185,19 +180,15 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # Download Images
-      # --------------------------------------------------------
-
-      - name: Download Docker images
+      - name: Download DEV Docker images
         uses: actions/download-artifact@v4
         with:
-          name: docker-images-${{ github.sha }}
+          name: docker-images-dev-${{ github.sha }}
           path: docker-images
 
 
       # --------------------------------------------------------
-      # Push User Service
+      # Push user-service
       # --------------------------------------------------------
 
       - name: Push user-service to DEV ECR
@@ -212,7 +203,7 @@ jobs:
 
 
       # --------------------------------------------------------
-      # Push Order Service
+      # Push order-service
       # --------------------------------------------------------
 
       - name: Push order-service to DEV ECR
@@ -227,27 +218,28 @@ jobs:
 
 
   # ============================================================
-  # 3. PUSH PROD ECR
+  # 3. BUILD PROD
   #
-  # PROD APPROVAL REQUIRED
+  # IMPORTANT:
   #
-  # This is intentionally a separate job because GitHub
-  # Environment approval happens at JOB level.
+  # PROD approval happens BEFORE this job starts.
   #
-  # ECR repository:
-  #   prod
+  # Therefore:
+  #
+  # PROD Approval
+  #      ↓
+  # Build NEW PROD images
+  #
+  # This does NOT reuse DEV build artifacts.
   # ============================================================
 
-  push-prod:
-    name: Push Images - PROD
-
-    needs:
-      - build
+  build-prod:
+    name: Build Docker Images - PROD
 
     if: >-
       ${{ inputs.environment == 'prod' &&
       inputs.build_images &&
-      needs.build.result == 'success' }}
+      inputs.terraform_action != 'destroy' }}
 
     runs-on: ubuntu-latest
 
@@ -255,24 +247,93 @@ jobs:
       name: prod
 
     permissions:
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------------
+      # Build NEW PROD user-service
+      # --------------------------------------------------------
+
+      - name: Build user-service
+        uses: ./.github/actions/build
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          service-name: user-service
+          dockerfile-path: ./services/user-service
+          image-tag: ${{ inputs.user_service_tag || github.sha }}
+          environment-tag: prod
+
+
+      # --------------------------------------------------------
+      # Build NEW PROD order-service
+      # --------------------------------------------------------
+
+      - name: Build order-service
+        uses: ./.github/actions/build
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          service-name: order-service
+          dockerfile-path: ./services/order-service
+          image-tag: ${{ inputs.order_service_tag || github.sha }}
+          environment-tag: prod
+
+
+      # --------------------------------------------------------
+      # Upload PROD images
+      # --------------------------------------------------------
+
+      - name: Upload PROD Docker images
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images-prod-${{ github.sha }}
+          path: docker-images/
+          retention-days: 1
+
+
+  # ============================================================
+  # 4. PUSH PROD ECR
+  #
+  # NO environment HERE.
+  #
+  # Approval already happened in build-prod.
+  #
+  # This job only pushes the newly-built PROD images.
+  # ============================================================
+
+  push-prod:
+    name: Push Images - PROD
+
+    needs:
+      - build-prod
+
+    if: >-
+      ${{ inputs.environment == 'prod' &&
+      inputs.build_images &&
+      inputs.terraform_action != 'destroy' &&
+      needs.build-prod.result == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    permissions:
       id-token: write
       contents: read
 
     steps:
 
-      # --------------------------------------------------------
-      # Download Images
-      # --------------------------------------------------------
-
-      - name: Download Docker images
+      - name: Download PROD Docker images
         uses: actions/download-artifact@v4
         with:
-          name: docker-images-${{ github.sha }}
+          name: docker-images-prod-${{ github.sha }}
           path: docker-images
 
 
       # --------------------------------------------------------
-      # Push User Service
+      # Push user-service
       # --------------------------------------------------------
 
       - name: Push user-service to PROD ECR
@@ -287,7 +348,7 @@ jobs:
 
 
       # --------------------------------------------------------
-      # Push Order Service
+      # Push order-service
       # --------------------------------------------------------
 
       - name: Push order-service to PROD ECR
@@ -302,10 +363,9 @@ jobs:
 
 
   # ============================================================
-  # 4. TERRAFORM PLAN
+  # 5. TERRAFORM PLAN
   #
   # NO APPROVAL
-  # NO GITHUB ENVIRONMENT
   # ============================================================
 
   terraform-plan:
@@ -321,17 +381,9 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # Checkout
-      # --------------------------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # --------------------------------------------------------
-      # Terraform Plan
-      # --------------------------------------------------------
 
       - name: Terraform Plan
         uses: ./.github/actions/deploy-infrastructure
@@ -349,12 +401,10 @@ jobs:
 
 
   # ============================================================
-  # 5. TERRAFORM APPLY
+  # 6. TERRAFORM APPLY
   #
-  # APPROVAL REQUIRED
-  #
-  # DEV  -> dev approval
-  # PROD -> prod approval
+  # DEV  -> DEV approval
+  # PROD -> PROD approval
   # ============================================================
 
   terraform-apply:
@@ -379,17 +429,9 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------------
-      # Checkout
-      # --------------------------------------------------------
-
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # --------------------------------------------------------
-      # Terraform Apply
-      # --------------------------------------------------------
 
       - name: Terraform Apply
         uses: ./.github/actions/deploy-infrastructure
@@ -407,26 +449,70 @@ jobs:
 
 
   # ============================================================
-  # 6. DEPLOY DEV
+  # 7. TERRAFORM DESTROY
+  #
+  # DEV  -> DEV approval
+  # PROD -> PROD approval
+  #
+  # No application deployment after destroy.
+  # ============================================================
+
+  terraform-destroy:
+    name: Terraform Destroy
+
+    if: >-
+      ${{ inputs.deploy_infrastructure &&
+      inputs.terraform_action == 'destroy' }}
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      - name: Terraform Destroy
+        uses: ./.github/actions/deploy-infrastructure
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          environment: ${{ inputs.environment }}
+          terraform-dir: terraform/environments
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
+          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+          action: destroy
+
+
+  # ============================================================
+  # 8. DEPLOY DEV
   #
   # NO APPROVAL
-  #
-  # IMPORTANT:
-  # There is NO environment: dev here.
   # ============================================================
 
   deploy-dev:
     name: Deploy Application - DEV
 
     needs:
-      - build
+      - build-dev
       - push-dev
       - terraform-apply
 
     if: >-
       ${{ inputs.environment == 'dev' &&
       inputs.deploy_application &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      inputs.terraform_action != 'destroy' &&
+      (needs.build-dev.result == 'success' || needs.build-dev.result == 'skipped') &&
       (needs.push-dev.result == 'success' || needs.push-dev.result == 'skipped') &&
       (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
 
@@ -460,23 +546,24 @@ jobs:
 
 
   # ============================================================
-  # 7. DEPLOY PROD
+  # 9. DEPLOY PROD
   #
-  # PROD APPROVAL REQUIRED
+  # PROD approval required.
   # ============================================================
 
   deploy-prod:
     name: Deploy Application - PROD
 
     needs:
-      - build
+      - build-prod
       - push-prod
       - terraform-apply
 
     if: >-
       ${{ inputs.environment == 'prod' &&
       inputs.deploy_application &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      inputs.terraform_action != 'destroy' &&
+      (needs.build-prod.result == 'success' || needs.build-prod.result == 'skipped') &&
       (needs.push-prod.result == 'success' || needs.push-prod.result == 'skipped') &&
       (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
 
