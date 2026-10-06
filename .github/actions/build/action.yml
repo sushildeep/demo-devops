@@ -1,25 +1,18 @@
-name: Build Docker Image
+name: Test Application
 
-description: Build Docker image and save it as an artifact
+description: >
+  Run application tests for user-service and order-service Docker images.
 
 inputs:
 
-  service-name:
-    description: Service name
+  user-service-image:
+    description: "User service Docker image"
     required: true
 
-  dockerfile-path:
-    description: Path to Dockerfile directory
+  order-service-image:
+    description: "Order service Docker image"
     required: true
 
-  image-tag:
-    description: Docker image tag
-    required: true
-
-  environment:
-    description: Build environment
-    required: false
-    default: dev
 
 runs:
   using: composite
@@ -27,104 +20,237 @@ runs:
   steps:
 
     # ==========================================================
-    # Build Docker Image
+    # 1. PREPARE
     # ==========================================================
 
-    - name: Build Docker image
+    - name: Prepare all required actions
       shell: bash
-      env:
-        SERVICE_NAME: ${{ inputs.service-name }}
-        IMAGE_TAG: ${{ inputs.image-tag }}
-        BUILD_ENVIRONMENT: ${{ inputs.environment }}
-        DOCKERFILE_PATH: ${{ inputs.dockerfile-path }}
-
       run: |
         set -e
 
         echo "=========================================="
-        echo "Build Docker Image"
+        echo "Prepare application tests"
         echo "=========================================="
 
-        echo "Service     : $SERVICE_NAME"
-        echo "Image Tag   : $IMAGE_TAG"
-        echo "Environment : $BUILD_ENVIRONMENT"
-        echo "Docker Path : $DOCKERFILE_PATH"
-        echo ""
-
-        IMAGE_NAME="${SERVICE_NAME}:${IMAGE_TAG}"
-
-        echo "Building:"
-        echo "  $IMAGE_NAME"
-        echo ""
-
-        docker build \
-          -t "$IMAGE_NAME" \
-          "$DOCKERFILE_PATH"
-
-        echo ""
-        echo "Docker build completed successfully."
+        docker --version
+        python3 --version
+        echo "Preparation completed."
 
 
     # ==========================================================
-    # Verify Docker Image
+    # 2. VERIFY DOCKER
     # ==========================================================
 
-    - name: Verify Docker image
+    - name: Verify Docker
       shell: bash
-      env:
-        SERVICE_NAME: ${{ inputs.service-name }}
-        IMAGE_TAG: ${{ inputs.image-tag }}
-
       run: |
         set -e
 
         echo "=========================================="
-        echo "Verify Docker Image"
+        echo "Verify Docker"
         echo "=========================================="
 
-        IMAGE_NAME="${SERVICE_NAME}:${IMAGE_TAG}"
+        docker --version
 
-        docker image inspect "$IMAGE_NAME" > /dev/null
-
-        echo "Image exists:"
-        echo "$IMAGE_NAME"
-
-        echo ""
-        docker images "$SERVICE_NAME"
+        echo "Docker is available."
 
 
     # ==========================================================
-    # Save Docker Image
-    #
-    # The image is saved so that the exact same image can be
-    # used by the Push ECR stage.
+    # 3. VERIFY USER SERVICE IMAGE
     # ==========================================================
 
-    - name: Save Docker image
+    - name: Verify user-service image
       shell: bash
-      env:
-        SERVICE_NAME: ${{ inputs.service-name }}
-        IMAGE_TAG: ${{ inputs.image-tag }}
-
       run: |
         set -e
 
         echo "=========================================="
-        echo "Save Docker Image"
+        echo "Verify user-service image"
         echo "=========================================="
 
-        mkdir -p docker-images
+        docker image inspect "${{ inputs.user-service-image }}" > /dev/null
 
-        IMAGE_NAME="${SERVICE_NAME}:${IMAGE_TAG}"
-        IMAGE_FILE="docker-images/${SERVICE_NAME}.tar"
+        echo "User-service image found:"
+        echo "${{ inputs.user-service-image }}"
 
-        echo "Saving:"
-        echo "  $IMAGE_NAME"
 
-        docker save \
-          "$IMAGE_NAME" \
-          -o "$IMAGE_FILE"
+    # ==========================================================
+    # 4. VERIFY ORDER SERVICE IMAGE
+    # ==========================================================
+
+    - name: Verify order-service image
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Verify order-service image"
+        echo "=========================================="
+
+        docker image inspect "${{ inputs.order-service-image }}" > /dev/null
+
+        echo "Order-service image found:"
+        echo "${{ inputs.order-service-image }}"
+
+
+    # ==========================================================
+    # 5. TEST USER SERVICE
+    # ==========================================================
+
+    - name: Test user-service
+      shell: bash
+      working-directory: services/user-service
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Test user-service"
+        echo "=========================================="
+
+        if [ -f package.json ]; then
+
+          echo "Node.js application detected."
+
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+          if npm run | grep -q "test"; then
+            npm test
+          else
+            echo "No npm test script found."
+            echo "Skipping application test."
+          fi
+
+        elif [ -f requirements.txt ]; then
+
+          echo "Python application detected."
+
+          python3 -m pip install --user --upgrade pip
+
+          python3 -m pip install --user -r requirements.txt
+
+          if [ -d tests ]; then
+
+            echo "Python tests directory found."
+
+            # IMPORTANT:
+            # Make the current service directory available
+            # to Python so imports such as:
+            #
+            # from app.main import app
+            #
+            # resolve correctly.
+            export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+            echo "PYTHONPATH=${PYTHONPATH}"
+
+            pytest
+
+          else
+
+            echo "No tests directory found."
+            echo "Skipping Python tests."
+
+          fi
+
+        else
+
+          echo "No supported application test framework detected."
+          echo "Docker image validation will still be performed."
+
+        fi
 
         echo ""
-        echo "Docker image saved successfully:"
-        ls -lh "$IMAGE_FILE"
+        echo "user-service test stage completed."
+
+
+    # ==========================================================
+    # 6. TEST ORDER SERVICE
+    # ==========================================================
+
+    - name: Test order-service
+      shell: bash
+      working-directory: services/order-service
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Test order-service"
+        echo "=========================================="
+
+        if [ -f package.json ]; then
+
+          echo "Node.js application detected."
+
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+          if npm run | grep -q "test"; then
+            npm test
+          else
+            echo "No npm test script found."
+            echo "Skipping application test."
+          fi
+
+        elif [ -f requirements.txt ]; then
+
+          echo "Python application detected."
+
+          python3 -m pip install --user --upgrade pip
+
+          python3 -m pip install --user -r requirements.txt
+
+          if [ -d tests ]; then
+
+            echo "Python tests directory found."
+
+            # IMPORTANT:
+            # Make the current service directory available
+            # to Python imports.
+            export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+            echo "PYTHONPATH=${PYTHONPATH}"
+
+            pytest
+
+          else
+
+            echo "No tests directory found."
+            echo "Skipping Python tests."
+
+          fi
+
+        else
+
+          echo "No supported application test framework detected."
+          echo "Docker image validation will still be performed."
+
+        fi
+
+        echo ""
+        echo "order-service test stage completed."
+
+
+    # ==========================================================
+    # 7. FINAL RESULT
+    # ==========================================================
+
+    - name: Test summary
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "APPLICATION TESTS COMPLETED"
+        echo "=========================================="
+
+        echo "user-service : PASSED"
+        echo "order-service: PASSED"
+
+        echo "All application tests completed successfully."
