@@ -1,25 +1,37 @@
 name: Test Application
 
-description: Run application tests and validate Docker images
+description: Run application tests for user-service and order-service
 
 inputs:
 
   user-service-image:
-    description: User service Docker image
+    description: "User service Docker image"
     required: true
 
   order-service-image:
-    description: Order service Docker image
+    description: "Order service Docker image"
     required: true
+
 
 runs:
   using: composite
 
   steps:
 
-    # ==========================================================
-    # Verify Docker
-    # ==========================================================
+    - name: Prepare all required actions
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Prepare application tests"
+        echo "=========================================="
+
+        docker --version
+        python3 --version
+
+        echo "Preparation completed."
+
 
     - name: Verify Docker
       shell: bash
@@ -27,69 +39,52 @@ runs:
         set -e
 
         echo "=========================================="
-        echo "Docker Verification"
+        echo "Verify Docker"
         echo "=========================================="
 
         docker --version
 
-        echo ""
         echo "Docker is available."
 
 
-    # ==========================================================
-    # Verify User Service Image
-    # ==========================================================
-
     - name: Verify user-service image
       shell: bash
-      env:
-        USER_SERVICE_IMAGE: ${{ inputs.user-service-image }}
-
       run: |
         set -e
 
         echo "=========================================="
-        echo "Verify user-service Image"
+        echo "Verify user-service image"
         echo "=========================================="
 
-        echo "Image:"
-        echo "$USER_SERVICE_IMAGE"
+        IMAGE="${{ inputs.user-service-image }}"
 
-        docker image inspect "$USER_SERVICE_IMAGE" > /dev/null
+        echo "Image: ${IMAGE}"
 
-        echo ""
-        echo "user-service image exists."
+        docker image inspect "${IMAGE}" > /dev/null
 
+        echo "User-service image found."
 
-    # ==========================================================
-    # Verify Order Service Image
-    # ==========================================================
 
     - name: Verify order-service image
       shell: bash
-      env:
-        ORDER_SERVICE_IMAGE: ${{ inputs.order-service-image }}
-
       run: |
         set -e
 
         echo "=========================================="
-        echo "Verify order-service Image"
+        echo "Verify order-service image"
         echo "=========================================="
 
-        echo "Image:"
-        echo "$ORDER_SERVICE_IMAGE"
+        IMAGE="${{ inputs.order-service-image }}"
 
-        docker image inspect "$ORDER_SERVICE_IMAGE" > /dev/null
+        echo "Image: ${IMAGE}"
 
-        echo ""
-        echo "order-service image exists."
+        docker image inspect "${IMAGE}" > /dev/null
+
+        echo "Order-service image found."
 
 
     # ==========================================================
-    # User Service Tests
-    #
-    # Automatically detect common test frameworks.
+    # USER SERVICE TEST
     # ==========================================================
 
     - name: Test user-service
@@ -123,14 +118,30 @@ runs:
 
           echo "Python application detected."
 
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python3 -m pip install --user --upgrade pip
+
+          python3 -m pip install \
+            --user \
+            -r requirements.txt
 
           if [ -d tests ]; then
+
+            echo "Python tests directory found."
+
+            # Allow:
+            # from app.main import app
+
+            export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+            echo "PYTHONPATH=${PYTHONPATH}"
+
             pytest
+
           else
+
             echo "No tests directory found."
             echo "Skipping Python tests."
+
           fi
 
         else
@@ -145,7 +156,7 @@ runs:
 
 
     # ==========================================================
-    # Order Service Tests
+    # ORDER SERVICE TEST
     # ==========================================================
 
     - name: Test order-service
@@ -179,14 +190,27 @@ runs:
 
           echo "Python application detected."
 
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python3 -m pip install --user --upgrade pip
+
+          python3 -m pip install \
+            --user \
+            -r requirements.txt
 
           if [ -d tests ]; then
+
+            echo "Python tests directory found."
+
+            export PYTHONPATH="${PWD}:${PYTHONPATH}"
+
+            echo "PYTHONPATH=${PYTHONPATH}"
+
             pytest
+
           else
+
             echo "No tests directory found."
             echo "Skipping Python tests."
+
           fi
 
         else
@@ -200,18 +224,14 @@ runs:
         echo "order-service test stage completed."
 
 
-    # ==========================================================
-    # Final Test Summary
-    # ==========================================================
-
-    - name: Test Summary
+    - name: Test summary
       shell: bash
       run: |
+        set -e
+
         echo "=========================================="
-        echo "Application Test Summary"
+        echo "APPLICATION TESTS COMPLETED"
         echo "=========================================="
-        echo "user-service : ${{ inputs.user-service-image }}"
-        echo "order-service: ${{ inputs.order-service-image }}"
-        echo ""
-        echo "All configured tests completed successfully."
-        echo "=========================================="
+
+        echo "user-service : PASSED"
+        echo "order-service: PASSED"
