@@ -1,0 +1,391 @@
+name: CI/CD Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      # ----------------------------------------------------------
+      # Deployment Environment
+      # ----------------------------------------------------------
+
+      environment:
+        description: Deployment environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+
+      # ----------------------------------------------------------
+      # Build
+      # ----------------------------------------------------------
+
+      build_images:
+        description: Build Docker images?
+        required: true
+        type: boolean
+        default: true
+
+      # ----------------------------------------------------------
+      # Infrastructure
+      # ----------------------------------------------------------
+
+      deploy_infrastructure:
+        description: Deploy Terraform infrastructure?
+        required: true
+        type: boolean
+        default: false
+
+      terraform_action:
+        description: Terraform action
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+      # ----------------------------------------------------------
+      # Application
+      # ----------------------------------------------------------
+
+      deploy_application:
+        description: Deploy application to EKS?
+        required: true
+        type: boolean
+        default: false
+
+      # ----------------------------------------------------------
+      # Image Tags
+      # ----------------------------------------------------------
+
+      user_service_tag:
+        description: User service image tag
+        required: false
+        type: string
+
+      order_service_tag:
+        description: Order service image tag
+        required: false
+        type: string
+
+
+# ==============================================================
+# GLOBAL ENVIRONMENT
+# ==============================================================
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: "1.5.0"
+
+
+jobs:
+
+  # ============================================================
+  # 1. BUILD
+  #
+  # NO APPROVAL
+  # NO GITHUB ENVIRONMENT
+  # ============================================================
+
+  build:
+    name: Build Docker Images
+
+    if: ${{ inputs.build_images }}
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Build User Service
+      # --------------------------------------------------------
+
+      - name: Build user-service
+        uses: ./.github/actions/build-and-push-image
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          service-name: user-service
+          dockerfile-path: ./services/user-service
+          image-tag: ${{ inputs.user_service_tag || github.sha }}
+
+          # Repository secret
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+          environment-tag: ${{ inputs.environment }}
+          ecr-repository: ${{ inputs.environment }}
+
+      # --------------------------------------------------------
+      # Build Order Service
+      # --------------------------------------------------------
+
+      - name: Build order-service
+        uses: ./.github/actions/build-and-push-image
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          service-name: order-service
+          dockerfile-path: ./services/order-service
+          image-tag: ${{ inputs.order_service_tag || github.sha }}
+
+          # Repository secret
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+          environment-tag: ${{ inputs.environment }}
+          ecr-repository: ${{ inputs.environment }}
+
+
+  # ============================================================
+  # 2. TERRAFORM PLAN
+  #
+  # NO APPROVAL
+  # NO GITHUB ENVIRONMENT
+  # ============================================================
+
+  terraform-plan:
+    name: Terraform Plan
+
+    if: ${{ inputs.deploy_infrastructure }}
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout
+      # --------------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------------
+      # Terraform Plan
+      # --------------------------------------------------------
+
+      - name: Terraform Plan
+        uses: ./.github/actions/deploy-infrastructure
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+
+          environment: ${{ inputs.environment }}
+
+          terraform-dir: terraform/environments
+
+          tfvars-file: terraform.tfvars
+
+          # Repository secret
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
+
+          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
+
+          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+
+          action: plan
+
+
+  # ============================================================
+  # 3. TERRAFORM APPLY
+  #
+  # APPROVAL REQUIRED FOR BOTH DEV AND PROD
+  # ============================================================
+
+  terraform-apply:
+    name: Terraform Apply
+
+    needs:
+      - terraform-plan
+
+    if: >-
+      ${{ inputs.deploy_infrastructure &&
+      inputs.terraform_action == 'apply' &&
+      needs.terraform-plan.result == 'success' }}
+
+    runs-on: ubuntu-latest
+
+    # ----------------------------------------------------------
+    # This triggers the selected environment approval.
+    #
+    # dev  -> DEV approval
+    # prod -> PROD approval
+    # ----------------------------------------------------------
+
+    environment:
+      name: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform Apply
+        uses: ./.github/actions/deploy-infrastructure
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+
+          environment: ${{ inputs.environment }}
+
+          terraform-dir: terraform/environments
+
+          tfvars-file: terraform.tfvars
+
+          # Environment secret becomes available after approval
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
+
+          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
+
+          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+
+          action: apply
+
+
+  # ============================================================
+  # 4. DEPLOY DEV
+  #
+  # DEV DEPLOY = NO APPROVAL
+  #
+  # IMPORTANT:
+  # No environment is specified here.
+  # ============================================================
+
+  deploy-dev:
+    name: Deploy Application - DEV
+
+    needs:
+      - build
+      - terraform-apply
+
+    if: >-
+      ${{ inputs.environment == 'dev' &&
+      inputs.deploy_application &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to DEV EKS
+        uses: ./.github/actions/deploy-application
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+
+          cluster-name: microservices-dev-eks
+
+          environment: dev
+
+          helm-chart-path: ./helm
+
+          helm-release-name: microservices-app
+
+          helm-namespace: default
+
+          helm-values-file: helm/values-dev.yaml
+
+          user-service-image-tag: ${{ inputs.user_service_tag || github.sha }}
+
+          order-service-image-tag: ${{ inputs.order_service_tag || github.sha }}
+
+          # Repository secret
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+          helm-timeout: 10m
+
+          wait-for-rollout: true
+
+
+  # ============================================================
+  # 5. DEPLOY PROD
+  #
+  # PROD DEPLOY = APPROVAL REQUIRED
+  # ============================================================
+
+  deploy-prod:
+    name: Deploy Application - PROD
+
+    needs:
+      - build
+      - terraform-apply
+
+    if: >-
+      ${{ inputs.environment == 'prod' &&
+      inputs.deploy_application &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
+
+    runs-on: ubuntu-latest
+
+    # ----------------------------------------------------------
+    # PROD ENVIRONMENT APPROVAL
+    # ----------------------------------------------------------
+
+    environment:
+      name: prod
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to PROD EKS
+        uses: ./.github/actions/deploy-application
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+
+          cluster-name: microservices-prod-eks
+
+          environment: prod
+
+          helm-chart-path: ./helm
+
+          helm-release-name: microservices-app
+
+          helm-namespace: default
+
+          helm-values-file: helm/values-prod.yaml
+
+          user-service-image-tag: ${{ inputs.user_service_tag || github.sha }}
+
+          order-service-image-tag: ${{ inputs.order_service_tag || github.sha }}
+
+          # Environment secret becomes available after PROD approval
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+          helm-timeout: 10m
+
+          wait-for-rollout: true

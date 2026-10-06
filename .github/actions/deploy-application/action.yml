@@ -100,10 +100,13 @@ runs:
       id: aws-account
       shell: bash
       run: |
+        set -e
+
         ACCOUNT_ID=$(aws sts get-caller-identity \
           --query Account \
           --output text)
 
+        echo "AWS Account ID: $ACCOUNT_ID"
         echo "account-id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
 
     # ------------------------------------------------------------
@@ -145,6 +148,8 @@ runs:
     - name: Create namespace
       shell: bash
       run: |
+        set -e
+
         kubectl create namespace "${{ inputs.helm-namespace }}" \
           --dry-run=client \
           -o yaml | \
@@ -157,7 +162,9 @@ runs:
     - name: Validate Helm chart
       shell: bash
       run: |
-        helm lint "${{ inputs.helm-chart-path}"
+        set -e
+
+        helm lint "${{ inputs.helm-chart-path }}"
 
     # ------------------------------------------------------------
     # Helm dry run
@@ -201,16 +208,24 @@ runs:
         echo "Environment: ${{ inputs.environment }}"
         echo "Cluster: ${{ inputs.cluster-name }}"
 
-        helm upgrade --install \
-          "${{ inputs.helm-release-name }}" \
-          "${{ inputs.helm-chart-path }}" \
-          --namespace "${{ inputs.helm-namespace }}" \
-          --values "${{ inputs.helm-values-file }}" \
-          --set image.registry="${ACCOUNT_ID}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com" \
-          --set image.user_service.tag="${{ inputs.user-service-image-tag }}" \
-          --set image.order_service.tag="${{ inputs.order-service-image-tag }}" \
-          --timeout "${{ inputs.helm-timeout }}" \
-          --wait
+        HELM_ARGS=(
+          upgrade
+          --install
+          "${{ inputs.helm-release-name }}"
+          "${{ inputs.helm-chart-path }}"
+          --namespace "${{ inputs.helm-namespace }}"
+          --values "${{ inputs.helm-values-file }}"
+          --set "image.registry=${ACCOUNT_ID}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com"
+          --set "image.user_service.tag=${{ inputs.user-service-image-tag }}"
+          --set "image.order_service.tag=${{ inputs.order-service-image-tag }}"
+          --timeout "${{ inputs.helm-timeout }}"
+        )
+
+        if [ "${{ inputs.wait-for-rollout }}" = "true" ]; then
+          HELM_ARGS+=(--wait)
+        fi
+
+        helm "${HELM_ARGS[@]}"
 
         RELEASE_VERSION=$(helm list \
           -n "${{ inputs.helm-namespace }}" \
@@ -287,6 +302,7 @@ runs:
       run: |
         echo "Deployment failed."
         echo ""
+
         echo "Pods:"
         kubectl get pods \
           -n "${{ inputs.helm-namespace }}" \
@@ -324,4 +340,5 @@ runs:
       with:
         name: helm-manifest-${{ inputs.environment }}
         path: /tmp/helm-dry-run.yaml
+        if-no-files-found: ignore
         retention-days: 7

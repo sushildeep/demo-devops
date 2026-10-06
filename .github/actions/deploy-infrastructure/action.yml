@@ -10,7 +10,7 @@ inputs:
   terraform-version:
     description: Terraform version
     required: false
-    default: 1.5.0
+    default: "1.5.0"
 
   environment:
     description: Environment name
@@ -70,6 +70,10 @@ runs:
         role-to-assume: ${{ inputs.aws-role-to-assume }}
         aws-region: ${{ inputs.aws-region }}
 
+    # ----------------------------------------------------------
+    # Verify AWS
+    # ----------------------------------------------------------
+
     - name: Verify AWS identity
       shell: bash
       run: |
@@ -79,7 +83,7 @@ runs:
         aws sts get-caller-identity
 
     # ----------------------------------------------------------
-    # Terraform
+    # Setup Terraform
     # ----------------------------------------------------------
 
     - name: Setup Terraform
@@ -197,14 +201,19 @@ runs:
       run: |
         set -e
 
-        echo "Applying Terraform changes..."
+        echo "=========================================="
+        echo "Terraform Apply"
+        echo "=========================================="
+        echo "Environment: ${{ inputs.environment }}"
+        echo ""
 
         terraform apply \
           -auto-approve \
           -input=false \
           tfplan
 
-        echo "Terraform apply completed."
+        echo ""
+        echo "Terraform apply completed successfully."
 
         echo "summary=Terraform infrastructure deployed successfully" \
           >> "$GITHUB_OUTPUT"
@@ -224,6 +233,10 @@ runs:
         terraform output
 
         terraform output -json > terraform-outputs.json
+
+    # ----------------------------------------------------------
+    # Upload Terraform Outputs
+    # ----------------------------------------------------------
 
     - name: Upload Terraform Outputs
       if: inputs.action == 'apply'
@@ -246,14 +259,18 @@ runs:
       run: |
         set -e
 
-        echo "WARNING: Destroying infrastructure."
+        echo "=========================================="
+        echo "WARNING: Terraform Destroy"
+        echo "=========================================="
         echo "Environment: ${{ inputs.environment }}"
+        echo ""
 
         terraform destroy \
           -auto-approve \
           -input=false \
           -var-file="${{ inputs.tfvars-file }}"
 
+        echo ""
         echo "Terraform destroy completed."
 
         echo "summary=Terraform infrastructure destroyed successfully" \
