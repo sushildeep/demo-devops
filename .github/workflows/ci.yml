@@ -2,12 +2,41 @@ name: CI/CD Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+
+      deployment_target:
+        description: "Select deployment target"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+          - both
+        default: both
+
+      terraform_action:
+        description: "Select Terraform action"
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: apply
+
+      run_tests:
+        description: "Run application tests"
+        required: true
+        type: boolean
+        default: true
+
 
 # ============================================================
 # GLOBAL CONFIGURATION
 # ============================================================
 
 env:
+
   AWS_REGION: ${{ secrets.AWS_REGION }}
 
   TERRAFORM_VERSION: "1.5.0"
@@ -28,11 +57,15 @@ jobs:
 
   # ==========================================================
   # 1. VALIDATE
+  #
+  # Not required for Terraform destroy.
   # ==========================================================
 
   validate:
 
     name: Validate Repository
+
+    if: ${{ inputs.terraform_action != 'destroy' }}
 
     runs-on: ubuntu-latest
 
@@ -54,12 +87,15 @@ jobs:
   # ==========================================================
   # 2. BUILD
   #
-  # Build only ONCE.
+  # Build ONCE.
+  # Only required for apply.
   # ==========================================================
 
   build:
 
     name: Build Docker Images
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - validate
@@ -106,6 +142,8 @@ jobs:
 
     name: Test Application
 
+    if: ${{ inputs.terraform_action == 'apply' && inputs.run_tests }}
+
     needs:
       - build
 
@@ -145,14 +183,19 @@ jobs:
 
 
   # ==========================================================
-  # 4. PUSH TESTED IMAGES TO DEV ECR
+  # 4. PUSH DEV ECR
+  #
+  # If tests are disabled, build directly feeds this job.
   # ==========================================================
 
   push-dev:
 
     name: Push Images - DEV
 
+    if: ${{ inputs.terraform_action == 'apply' }}
+
     needs:
+      - build
       - test
 
     runs-on: ubuntu-latest
@@ -194,6 +237,10 @@ jobs:
   # ==========================================================
   # 5. TERRAFORM PLAN - DEV
   #
+  # Runs for:
+  #   plan
+  #   apply
+  #
   # NO APPROVAL
   # ==========================================================
 
@@ -201,7 +248,15 @@ jobs:
 
     name: Terraform Plan - DEV
 
+    if: >
+      ${{
+        inputs.deployment_target == 'dev' ||
+        inputs.deployment_target == 'both' ||
+        inputs.deployment_target == 'prod'
+      }}
+
     needs:
+      - validate
       - push-dev
 
     runs-on: ubuntu-latest
@@ -234,11 +289,15 @@ jobs:
   # 6. TERRAFORM APPLY - DEV
   #
   # DEV APPROVAL
+  #
+  # Only for apply.
   # ==========================================================
 
   terraform-apply-dev:
 
     name: Terraform Apply - DEV
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - terraform-plan-dev
@@ -279,7 +338,11 @@ jobs:
 
 
   # ==========================================================
-  # 7. DEPLOY APPLICATION - DEV
+  # 7. DEPLOY DEV
+  #
+  # Only for:
+  #   deployment_target = dev/both/prod
+  #   terraform_action = apply
   #
   # No additional approval.
   # ==========================================================
@@ -287,6 +350,8 @@ jobs:
   deploy-dev:
 
     name: Deploy Application - DEV
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - terraform-apply-dev
@@ -320,12 +385,14 @@ jobs:
 
 
   # ==========================================================
-  # 8. DEV SMOKE TEST
+  # 8. SMOKE TEST DEV
   # ==========================================================
 
   smoke-test-dev:
 
     name: Smoke Test - DEV
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - deploy-dev
@@ -380,14 +447,20 @@ jobs:
   # ==========================================================
   # 9. TERRAFORM PLAN - PROD
   #
-  # NO APPROVAL
+  # PROD ALWAYS REQUIRES DEV VALIDATION.
   #
-  # Only runs after DEV smoke test succeeds.
+  # Therefore prod/both run after DEV smoke test.
   # ==========================================================
 
   terraform-plan-prod:
 
     name: Terraform Plan - PROD
+
+    if: >
+      ${{
+        inputs.deployment_target == 'prod' ||
+        inputs.deployment_target == 'both'
+      }}
 
     needs:
       - smoke-test-dev
@@ -428,6 +501,8 @@ jobs:
 
     name: Terraform Apply - PROD
 
+    if: ${{ inputs.terraform_action == 'apply' }}
+
     needs:
       - terraform-plan-prod
 
@@ -467,14 +542,16 @@ jobs:
 
 
   # ==========================================================
-  # 11. PROMOTE SAME TESTED IMAGES TO PROD ECR
+  # 11. PROMOTE SAME TESTED IMAGES TO PROD
   #
-  # NO BUILD HERE.
+  # NO REBUILD.
   # ==========================================================
 
   promote-prod:
 
     name: Promote Images - PROD
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - terraform-apply-prod
@@ -516,7 +593,7 @@ jobs:
 
 
   # ==========================================================
-  # 12. DEPLOY APPLICATION - PROD
+  # 12. DEPLOY PROD
   #
   # prod-app APPROVAL
   # ==========================================================
@@ -524,6 +601,8 @@ jobs:
   deploy-prod:
 
     name: Deploy Application - PROD
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - promote-prod
@@ -560,12 +639,14 @@ jobs:
 
 
   # ==========================================================
-  # 13. PROD SMOKE TEST
+  # 13. SMOKE TEST PROD
   # ==========================================================
 
   smoke-test-prod:
 
     name: Smoke Test - PROD
+
+    if: ${{ inputs.terraform_action == 'apply' }}
 
     needs:
       - deploy-prod
@@ -618,12 +699,111 @@ jobs:
 
 
   # ==========================================================
-  # 14. SUMMARY
+  # 14. TERRAFORM DESTROY - DEV
+  #
+  # Destroy is completely separate from application deployment.
+  # DEV environment provides approval.
+  # ==========================================================
+
+  terraform-destroy-dev:
+
+    name: Terraform Destroy - DEV
+
+    if: >
+      ${{
+        inputs.terraform_action == 'destroy' &&
+        (
+          inputs.deployment_target == 'dev' ||
+          inputs.deployment_target == 'both'
+        )
+      }}
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: dev
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform Destroy - DEV
+        uses: ./.github/actions/deploy-infra
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          environment: dev
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ secrets.DEV_TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/dev/terraform.tfstate
+          state-lock-table: ${{ secrets.TERRAFORM_LOCK_TABLE }}
+          action: destroy
+
+
+  # ==========================================================
+  # 15. TERRAFORM DESTROY - PROD
+  #
+  # prod-infra APPROVAL
+  # ==========================================================
+
+  terraform-destroy-prod:
+
+    name: Terraform Destroy - PROD
+
+    if: >
+      ${{
+        inputs.terraform_action == 'destroy' &&
+        (
+          inputs.deployment_target == 'prod' ||
+          inputs.deployment_target == 'both'
+        )
+      }}
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: prod-infra
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform Destroy - PROD
+        uses: ./.github/actions/deploy-infra
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          environment: prod
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ secrets.PROD_TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/prod/terraform.tfstate
+          state-lock-table: ${{ secrets.TERRAFORM_LOCK_TABLE }}
+          action: destroy
+
+
+  # ==========================================================
+  # 16. PIPELINE SUMMARY
   # ==========================================================
 
   summary:
 
     name: Pipeline Summary
+
+    if: always()
 
     needs:
       - validate
@@ -639,8 +819,8 @@ jobs:
       - promote-prod
       - deploy-prod
       - smoke-test-prod
-
-    if: always()
+      - terraform-destroy-dev
+      - terraform-destroy-prod
 
     runs-on: ubuntu-latest
 
@@ -649,31 +829,37 @@ jobs:
       - name: Pipeline summary
         shell: bash
         run: |
+
           echo "=========================================="
           echo "CI/CD PIPELINE SUMMARY"
           echo "=========================================="
 
           echo ""
-          echo "Commit: ${{ github.sha }}"
+          echo "Deployment Target : ${{ inputs.deployment_target }}"
+          echo "Terraform Action  : ${{ inputs.terraform_action }}"
+          echo "Run Tests         : ${{ inputs.run_tests }}"
+          echo "Commit            : ${{ github.sha }}"
 
           echo ""
           echo "DEV"
-          echo "Validate        : ${{ needs.validate.result }}"
-          echo "Build           : ${{ needs.build.result }}"
-          echo "Test            : ${{ needs.test.result }}"
-          echo "Push ECR        : ${{ needs.push-dev.result }}"
-          echo "Terraform Plan  : ${{ needs.terraform-plan-dev.result }}"
-          echo "Terraform Apply : ${{ needs.terraform-apply-dev.result }}"
-          echo "Deploy          : ${{ needs.deploy-dev.result }}"
-          echo "Smoke Test      : ${{ needs.smoke-test-dev.result }}"
+          echo "Validate          : ${{ needs.validate.result }}"
+          echo "Build             : ${{ needs.build.result }}"
+          echo "Test              : ${{ needs.test.result }}"
+          echo "Push ECR          : ${{ needs.push-dev.result }}"
+          echo "Terraform Plan    : ${{ needs.terraform-plan-dev.result }}"
+          echo "Terraform Apply   : ${{ needs.terraform-apply-dev.result }}"
+          echo "Deploy            : ${{ needs.deploy-dev.result }}"
+          echo "Smoke Test        : ${{ needs.smoke-test-dev.result }}"
+          echo "Terraform Destroy : ${{ needs.terraform-destroy-dev.result }}"
 
           echo ""
           echo "PROD"
-          echo "Terraform Plan  : ${{ needs.terraform-plan-prod.result }}"
-          echo "Terraform Apply : ${{ needs.terraform-apply-prod.result }}"
-          echo "Image Promote   : ${{ needs.promote-prod.result }}"
-          echo "Deploy          : ${{ needs.deploy-prod.result }}"
-          echo "Smoke Test      : ${{ needs.smoke-test-prod.result }}"
+          echo "Terraform Plan    : ${{ needs.terraform-plan-prod.result }}"
+          echo "Terraform Apply   : ${{ needs.terraform-apply-prod.result }}"
+          echo "Image Promote     : ${{ needs.promote-prod.result }}"
+          echo "Deploy            : ${{ needs.deploy-prod.result }}"
+          echo "Smoke Test        : ${{ needs.smoke-test-prod.result }}"
+          echo "Terraform Destroy : ${{ needs.terraform-destroy-prod.result }}"
 
           echo ""
           echo "=========================================="
