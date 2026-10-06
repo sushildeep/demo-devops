@@ -1,5 +1,6 @@
 name: Push Docker Image to ECR
-description: Load Docker image and push it to AWS ECR
+
+description: Load tested Docker image and push it to AWS ECR
 
 inputs:
   aws-region:
@@ -13,10 +14,6 @@ inputs:
 
   image-tag:
     description: Docker image tag
-    required: true
-
-  environment-tag:
-    description: Environment tag
     required: true
 
   ecr-repository:
@@ -43,7 +40,10 @@ runs:
       run: |
         set -e
 
-        echo "AWS Identity:"
+        echo "=========================================="
+        echo "AWS Identity"
+        echo "=========================================="
+
         aws sts get-caller-identity
 
     - name: Login to Amazon ECR
@@ -57,14 +57,49 @@ runs:
       run: |
         set -e
 
-        echo "Loading Docker image..."
+        echo "=========================================="
+        echo "Load Docker Image"
+        echo "=========================================="
 
-        docker load \
-          -i "docker-images/${SERVICE_NAME}.tar"
+        IMAGE_FILE="docker-images/${SERVICE_NAME}.tar"
+
+        if [ ! -f "$IMAGE_FILE" ]; then
+          echo "ERROR: Docker image artifact not found:"
+          echo "$IMAGE_FILE"
+          exit 1
+        fi
+
+        echo "Loading:"
+        echo "$IMAGE_FILE"
+
+        docker load -i "$IMAGE_FILE"
 
         echo ""
-        echo "Loaded images:"
+        echo "Docker image loaded successfully."
+
         docker images "$SERVICE_NAME"
+
+    - name: Verify Docker image
+      shell: bash
+      env:
+        SERVICE_NAME: ${{ inputs.service-name }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Verify Docker Image"
+        echo "=========================================="
+
+        IMAGE_NAME="${SERVICE_NAME}:${IMAGE_TAG}"
+
+        echo "Expected image:"
+        echo "$IMAGE_NAME"
+
+        docker image inspect "$IMAGE_NAME" > /dev/null
+
+        echo ""
+        echo "Image verification successful."
 
     - name: Tag image for ECR
       shell: bash
@@ -73,37 +108,32 @@ runs:
         ECR_REPOSITORY: ${{ inputs.ecr-repository }}
         SERVICE_NAME: ${{ inputs.service-name }}
         IMAGE_TAG: ${{ inputs.image-tag }}
-        ENV_TAG: ${{ inputs.environment-tag }}
       run: |
         set -e
 
-        ECR_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY"
-
         echo "=========================================="
-        echo "Tagging Docker Image"
+        echo "Tag Docker Image for ECR"
         echo "=========================================="
-        echo "Registry    : $ECR_REGISTRY"
-        echo "Repository  : $ECR_REPOSITORY"
-        echo "Service     : $SERVICE_NAME"
-        echo "Image Tag   : $IMAGE_TAG"
-        echo "Environment : $ENV_TAG"
-        echo ""
 
-        docker tag \
-          "$SERVICE_NAME:$IMAGE_TAG" \
-          "$ECR_IMAGE:$SERVICE_NAME"
+        SOURCE_IMAGE="${SERVICE_NAME}:${IMAGE_TAG}"
 
-        docker tag \
-          "$SERVICE_NAME:$IMAGE_TAG" \
-          "$ECR_IMAGE:$SERVICE_NAME-$IMAGE_TAG"
+        ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${SERVICE_NAME}-${IMAGE_TAG}"
 
-        docker tag \
-          "$SERVICE_NAME:$IMAGE_TAG" \
-          "$ECR_IMAGE:$SERVICE_NAME-$ENV_TAG"
+        echo "Source:"
+        echo "$SOURCE_IMAGE"
 
         echo ""
-        echo "ECR images:"
-        docker images "$ECR_IMAGE"
+        echo "ECR:"
+        echo "$ECR_IMAGE"
+
+        docker tag \
+          "$SOURCE_IMAGE" \
+          "$ECR_IMAGE"
+
+        echo ""
+        echo "ECR image created successfully."
+
+        docker images "$ECR_REGISTRY/$ECR_REPOSITORY"
 
     - name: Push image to ECR
       shell: bash
@@ -112,28 +142,29 @@ runs:
         ECR_REPOSITORY: ${{ inputs.ecr-repository }}
         SERVICE_NAME: ${{ inputs.service-name }}
         IMAGE_TAG: ${{ inputs.image-tag }}
-        ENV_TAG: ${{ inputs.environment-tag }}
       run: |
         set -e
 
-        ECR_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY"
-
         echo "=========================================="
-        echo "Pushing Image to ECR"
+        echo "Push Docker Image to ECR"
         echo "=========================================="
 
-        docker push "$ECR_IMAGE:$SERVICE_NAME"
-        docker push "$ECR_IMAGE:$SERVICE_NAME-$IMAGE_TAG"
-        docker push "$ECR_IMAGE:$SERVICE_NAME-$ENV_TAG"
+        ECR_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${SERVICE_NAME}-${IMAGE_TAG}"
+
+        echo "Pushing:"
+        echo "$ECR_IMAGE"
+
+        docker push "$ECR_IMAGE"
 
         echo ""
         echo "=========================================="
         echo "ECR Push Successful"
         echo "=========================================="
-        echo "Repository: $ECR_REPOSITORY"
-        echo "Service   : $SERVICE_NAME"
+
+        echo "Repository : $ECR_REPOSITORY"
+        echo "Service    : $SERVICE_NAME"
+        echo "Image Tag  : $IMAGE_TAG"
+
         echo ""
-        echo "Images:"
-        echo "$ECR_IMAGE:$SERVICE_NAME"
-        echo "$ECR_IMAGE:$SERVICE_NAME-$IMAGE_TAG"
-        echo "$ECR_IMAGE:$SERVICE_NAME-$ENV_TAG"
+        echo "Image:"
+        echo "$ECR_IMAGE"

@@ -1,7 +1,9 @@
 name: Deploy Infrastructure with Terraform
+
 description: Manage AWS infrastructure using Terraform and GitHub OIDC
 
 inputs:
+
   aws-region:
     description: AWS Region
     required: false
@@ -10,7 +12,7 @@ inputs:
   terraform-version:
     description: Terraform version
     required: false
-    default: "1.5.0
+    default: "1.5.0"
 
   environment:
     description: Environment name
@@ -46,7 +48,9 @@ inputs:
     required: false
     default: plan
 
+
 outputs:
+
   plan-exists:
     description: Whether Terraform plan contains changes
     value: ${{ steps.plan.outputs.plan-exists }}
@@ -108,10 +112,13 @@ runs:
       run: |
         set -e
 
-        echo "Checking Terraform formatting..."
+        echo "=========================================="
+        echo "Terraform Format Check"
+        echo "=========================================="
 
         terraform fmt -check -recursive
 
+        echo ""
         echo "Terraform format check passed."
 
 
@@ -150,27 +157,25 @@ runs:
       run: |
         set -e
 
-        echo "Validating Terraform configuration..."
+        echo "=========================================="
+        echo "Terraform Validate"
+        echo "=========================================="
 
         terraform validate
 
+        echo ""
         echo "Terraform validation passed."
 
 
     # ==========================================================
     # Terraform Plan
     #
-    # Runs for:
-    #   plan
-    #   apply
-    #
-    # Does NOT run for:
-    #   destroy
+    # Runs ONLY when action = plan
     # ==========================================================
 
     - name: Terraform Plan
       id: plan
-      if: inputs.action == 'plan' || inputs.action == 'apply'
+      if: inputs.action == 'plan'
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
@@ -179,7 +184,9 @@ runs:
         echo "=========================================="
         echo "Terraform Plan"
         echo "=========================================="
-        echo "Environment: ${{ inputs.environment }}"
+
+        echo "Environment : ${{ inputs.environment }}"
+        echo "Action      : plan"
         echo ""
 
         terraform plan \
@@ -215,12 +222,13 @@ runs:
 
     # ==========================================================
     # Upload Terraform Plan
+    #
+    # The workflow can download this plan in the
+    # separate Terraform Apply job.
     # ==========================================================
 
     - name: Upload Terraform Plan
-      if: |
-        always() &&
-        (inputs.action == 'plan' || inputs.action == 'apply')
+      if: inputs.action == 'plan'
       uses: actions/upload-artifact@v4
       with:
         name: terraform-plan-${{ inputs.environment }}
@@ -230,19 +238,45 @@ runs:
 
 
     # ==========================================================
+    # Verify Terraform Plan
+    #
+    # Runs ONLY when action = apply
+    # ==========================================================
+
+    - name: Verify Terraform Plan
+      if: inputs.action == 'apply'
+      shell: bash
+      working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Verify Terraform Plan"
+        echo "=========================================="
+
+        if [ ! -f tfplan ]; then
+          echo "ERROR: Terraform plan file was not found."
+          echo ""
+          echo "Expected:"
+          echo "${{ inputs.terraform-dir }}/${{ inputs.environment }}/tfplan"
+          exit 1
+        fi
+
+        echo "Terraform plan found:"
+        ls -lh tfplan
+
+
+    # ==========================================================
     # Terraform Apply
     #
-    # Only runs when:
-    #   action = apply
+    # Runs ONLY when action = apply
     #
-    # Environment approval is handled by ci.yml.
+    # GitHub Environment approval is handled by ci.yml.
     # ==========================================================
 
     - name: Terraform Apply
       id: apply
-      if: |
-        inputs.action == 'apply' &&
-        steps.plan.outputs.plan-exists == 'true'
+      if: inputs.action == 'apply'
       shell: bash
       working-directory: ${{ inputs.terraform-dir }}/${{ inputs.environment }}
       run: |
@@ -251,7 +285,8 @@ runs:
         echo "=========================================="
         echo "Terraform Apply"
         echo "=========================================="
-        echo "Environment: ${{ inputs.environment }}"
+
+        echo "Environment : ${{ inputs.environment }}"
         echo ""
 
         terraform apply \
@@ -268,8 +303,6 @@ runs:
 
     # ==========================================================
     # Terraform Outputs
-    #
-    # Only relevant after APPLY.
     # ==========================================================
 
     - name: Terraform Outputs
@@ -305,12 +338,7 @@ runs:
     # ==========================================================
     # Terraform Destroy
     #
-    # Only runs when:
-    #   action = destroy
-    #
-    # IMPORTANT:
-    # ci.yml must put this job behind the DEV/PROD
-    # GitHub Environment approval.
+    # Kept for future/manual infrastructure destroy workflow.
     # ==========================================================
 
     - name: Terraform Destroy
@@ -324,9 +352,8 @@ runs:
         echo "=========================================="
         echo "WARNING: TERRAFORM DESTROY"
         echo "=========================================="
+
         echo "Environment: ${{ inputs.environment }}"
-        echo ""
-        echo "The following infrastructure will be destroyed:"
         echo ""
 
         terraform plan \
@@ -336,8 +363,6 @@ runs:
 
         echo ""
         echo "Destroy plan created."
-        echo ""
-        echo "Executing Terraform destroy..."
 
         terraform apply \
           -auto-approve \
@@ -362,9 +387,11 @@ runs:
         echo "=========================================="
         echo "Terraform Summary"
         echo "=========================================="
+
         echo "Environment : ${{ inputs.environment }}"
         echo "Action      : ${{ inputs.action }}"
         echo "State Bucket: ${{ inputs.state-bucket }}"
         echo "State Key   : ${{ inputs.state-key }}"
         echo "Lock Table  : ${{ inputs.state-lock-table }}"
+
         echo "=========================================="

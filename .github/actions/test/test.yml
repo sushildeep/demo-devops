@@ -1,0 +1,217 @@
+name: Test Application
+
+description: Run application tests and validate Docker images
+
+inputs:
+
+  user-service-image:
+    description: User service Docker image
+    required: true
+
+  order-service-image:
+    description: Order service Docker image
+    required: true
+
+runs:
+  using: composite
+
+  steps:
+
+    # ==========================================================
+    # Verify Docker
+    # ==========================================================
+
+    - name: Verify Docker
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Docker Verification"
+        echo "=========================================="
+
+        docker --version
+
+        echo ""
+        echo "Docker is available."
+
+
+    # ==========================================================
+    # Verify User Service Image
+    # ==========================================================
+
+    - name: Verify user-service image
+      shell: bash
+      env:
+        USER_SERVICE_IMAGE: ${{ inputs.user-service-image }}
+
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Verify user-service Image"
+        echo "=========================================="
+
+        echo "Image:"
+        echo "$USER_SERVICE_IMAGE"
+
+        docker image inspect "$USER_SERVICE_IMAGE" > /dev/null
+
+        echo ""
+        echo "user-service image exists."
+
+
+    # ==========================================================
+    # Verify Order Service Image
+    # ==========================================================
+
+    - name: Verify order-service image
+      shell: bash
+      env:
+        ORDER_SERVICE_IMAGE: ${{ inputs.order-service-image }}
+
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Verify order-service Image"
+        echo "=========================================="
+
+        echo "Image:"
+        echo "$ORDER_SERVICE_IMAGE"
+
+        docker image inspect "$ORDER_SERVICE_IMAGE" > /dev/null
+
+        echo ""
+        echo "order-service image exists."
+
+
+    # ==========================================================
+    # User Service Tests
+    #
+    # Automatically detect common test frameworks.
+    # ==========================================================
+
+    - name: Test user-service
+      shell: bash
+      working-directory: services/user-service
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Test user-service"
+        echo "=========================================="
+
+        if [ -f package.json ]; then
+
+          echo "Node.js application detected."
+
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+          if npm run | grep -q "test"; then
+            npm test
+          else
+            echo "No npm test script found."
+            echo "Skipping application test."
+          fi
+
+        elif [ -f requirements.txt ]; then
+
+          echo "Python application detected."
+
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+          if [ -d tests ]; then
+            pytest
+          else
+            echo "No tests directory found."
+            echo "Skipping Python tests."
+          fi
+
+        else
+
+          echo "No supported application test framework detected."
+          echo "Docker image validation will still be performed."
+
+        fi
+
+        echo ""
+        echo "user-service test stage completed."
+
+
+    # ==========================================================
+    # Order Service Tests
+    # ==========================================================
+
+    - name: Test order-service
+      shell: bash
+      working-directory: services/order-service
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Test order-service"
+        echo "=========================================="
+
+        if [ -f package.json ]; then
+
+          echo "Node.js application detected."
+
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+          if npm run | grep -q "test"; then
+            npm test
+          else
+            echo "No npm test script found."
+            echo "Skipping application test."
+          fi
+
+        elif [ -f requirements.txt ]; then
+
+          echo "Python application detected."
+
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+          if [ -d tests ]; then
+            pytest
+          else
+            echo "No tests directory found."
+            echo "Skipping Python tests."
+          fi
+
+        else
+
+          echo "No supported application test framework detected."
+          echo "Docker image validation will still be performed."
+
+        fi
+
+        echo ""
+        echo "order-service test stage completed."
+
+
+    # ==========================================================
+    # Final Test Summary
+    # ==========================================================
+
+    - name: Test Summary
+      shell: bash
+      run: |
+        echo "=========================================="
+        echo "Application Test Summary"
+        echo "=========================================="
+        echo "user-service : ${{ inputs.user-service-image }}"
+        echo "order-service: ${{ inputs.order-service-image }}"
+        echo ""
+        echo "All configured tests completed successfully."
+        echo "=========================================="

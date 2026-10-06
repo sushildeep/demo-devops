@@ -1,0 +1,190 @@
+name: Validate Repository
+
+description: Validate repository structure, Dockerfiles, Helm and Terraform configuration
+
+inputs:
+  terraform-version:
+    description: Terraform version
+    required: false
+    default: "1.5.0"
+
+  terraform-dir:
+    description: Terraform directory
+    required: false
+    default: terraform/environments
+
+runs:
+  using: composite
+
+  steps:
+
+    # ==========================================================
+    # Repository Validation
+    # ==========================================================
+
+    - name: Validate repository structure
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Repository Validation"
+        echo "=========================================="
+
+        REQUIRED_PATHS=(
+          "services/user-service"
+          "services/order-service"
+          "terraform"
+          "helm"
+        )
+
+        for path in "${REQUIRED_PATHS[@]}"; do
+          if [ ! -e "$path" ]; then
+            echo "ERROR: Required path does not exist: $path"
+            exit 1
+          fi
+
+          echo "OK: $path"
+        done
+
+        echo ""
+        echo "Repository structure validation passed."
+
+
+    # ==========================================================
+    # Dockerfile Validation
+    # ==========================================================
+
+    - name: Validate Dockerfiles
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Dockerfile Validation"
+        echo "=========================================="
+
+        DOCKERFILES=(
+          "services/user-service/Dockerfile"
+          "services/order-service/Dockerfile"
+        )
+
+        for dockerfile in "${DOCKERFILES[@]}"; do
+          if [ ! -f "$dockerfile" ]; then
+            echo "ERROR: Dockerfile not found: $dockerfile"
+            exit 1
+          fi
+
+          echo "OK: $dockerfile"
+        done
+
+        echo ""
+        echo "Dockerfile validation passed."
+
+
+    # ==========================================================
+    # Helm Validation
+    # ==========================================================
+
+    - name: Validate Helm chart
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Helm Validation"
+        echo "=========================================="
+
+        if [ ! -f "helm/Chart.yaml" ]; then
+          echo "ERROR: helm/Chart.yaml not found"
+          exit 1
+        fi
+
+        if [ ! -f "helm/values-dev.yaml" ]; then
+          echo "ERROR: helm/values-dev.yaml not found"
+          exit 1
+        fi
+
+        if [ ! -f "helm/values-prod.yaml" ]; then
+          echo "ERROR: helm/values-prod.yaml not found"
+          exit 1
+        fi
+
+        helm lint helm
+
+        echo ""
+        echo "Helm validation passed."
+
+
+    # ==========================================================
+    # Terraform Setup
+    # ==========================================================
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+
+
+    # ==========================================================
+    # Terraform Format
+    # ==========================================================
+
+    - name: Terraform Format Check
+      shell: bash
+      working-directory: ${{ inputs.terraform-dir }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Terraform Format Check"
+        echo "=========================================="
+
+        terraform fmt -check -recursive
+
+        echo ""
+        echo "Terraform format check passed."
+
+
+    # ==========================================================
+    # Terraform Validate - DEV
+    # ==========================================================
+
+    - name: Terraform Validate DEV
+      shell: bash
+      working-directory: ${{ inputs.terraform-dir }}/dev
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Terraform Validate - DEV"
+        echo "=========================================="
+
+        terraform init -backend=false
+
+        terraform validate
+
+        echo ""
+        echo "Terraform DEV validation passed."
+
+
+    # ==========================================================
+    # Terraform Validate - PROD
+    # ==========================================================
+
+    - name: Terraform Validate PROD
+      shell: bash
+      working-directory: ${{ inputs.terraform-dir }}/prod
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Terraform Validate - PROD"
+        echo "=========================================="
+
+        terraform init -backend=false
+
+        terraform validate
+
+        echo ""
+        echo "Terraform PROD validation passed."

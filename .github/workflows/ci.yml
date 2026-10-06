@@ -2,103 +2,37 @@ name: CI/CD Pipeline
 
 on:
   workflow_dispatch:
-    inputs:
 
-      # ==========================================================
-      # Deployment Environment
-      # ==========================================================
-
-      environment:
-        description: Deployment environment
-        required: true
-        type: choice
-        options:
-          - dev
-          - prod
-        default: dev
-
-      # ==========================================================
-      # Build
-      # ==========================================================
-
-      build_images:
-        description: Build Docker images?
-        required: true
-        type: boolean
-        default: true
-
-      # ==========================================================
-      # Infrastructure
-      # ==========================================================
-
-      deploy_infrastructure:
-        description: Deploy Terraform infrastructure?
-        required: true
-        type: boolean
-        default: false
-
-      terraform_action:
-        description: Terraform action
-        required: true
-        type: choice
-        options:
-          - plan
-          - apply
-          - destroy
-        default: plan
-
-      # ==========================================================
-      # Application
-      # ==========================================================
-
-      deploy_application:
-        description: Deploy application to EKS?
-        required: true
-        type: boolean
-        default: false
-
-      # ==========================================================
-      # Image Tags
-      # ==========================================================
-
-      user_service_tag:
-        description: User service image tag
-        required: false
-        type: string
-
-      order_service_tag:
-        description: Order service image tag
-        required: false
-        type: string
-
-
-# ==============================================================
-# GLOBAL ENVIRONMENT
-# ==============================================================
+# ============================================================
+# GLOBAL CONFIGURATION
+# ============================================================
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
   TERRAFORM_VERSION: "1.5.0"
+  TERRAFORM_DIR: terraform/environments
+
+  HELM_CHART_PATH: ./helm
+  HELM_RELEASE_NAME: microservices-app
+  HELM_NAMESPACE: default
+
+  DEV_ECR_REPOSITORY: dev
+  PROD_ECR_REPOSITORY: prod
+
+  DEV_CLUSTER: microservices-dev-eks
+  PROD_CLUSTER: microservices-prod-eks
 
 
 jobs:
 
-  # ============================================================
-  # 1. BUILD DEV
-  #
-  # DEV:
-  # Build → Push DEV
-  #
-  # NO APPROVAL
-  # ============================================================
+  # ==========================================================
+  # 1. VALIDATE
+  # ==========================================================
 
-  build-dev:
-    name: Build Docker Images - DEV
+  validate:
 
-    if: >-
-      ${{ inputs.environment == 'dev' &&
-      inputs.build_images &&
-      inputs.terraform_action != 'destroy' }}
+    name: Validate Repository
 
     runs-on: ubuntu-latest
 
@@ -110,67 +44,116 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate
+        uses: ./.github/actions/validate
+        with:
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
 
-      # --------------------------------------------------------
-      # Build user-service
-      # --------------------------------------------------------
+
+  # ==========================================================
+  # 2. BUILD
+  #
+  # Build only ONCE.
+  # ==========================================================
+
+  build:
+
+    name: Build Docker Images
+
+    needs:
+      - validate
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Build user-service
         uses: ./.github/actions/build
         with:
-          aws-region: ${{ env.AWS_REGION }}
           service-name: user-service
           dockerfile-path: ./services/user-service
-          image-tag: ${{ inputs.user_service_tag || github.sha }}
-          environment-tag: dev
-
-
-      # --------------------------------------------------------
-      # Build order-service
-      # --------------------------------------------------------
+          image-tag: ${{ github.sha }}
+          environment: dev
 
       - name: Build order-service
         uses: ./.github/actions/build
         with:
-          aws-region: ${{ env.AWS_REGION }}
           service-name: order-service
           dockerfile-path: ./services/order-service
-          image-tag: ${{ inputs.order_service_tag || github.sha }}
-          environment-tag: dev
+          image-tag: ${{ github.sha }}
+          environment: dev
 
-
-      # --------------------------------------------------------
-      # Upload DEV images
-      # --------------------------------------------------------
-
-      - name: Upload DEV Docker images
+      - name: Upload Docker images
         uses: actions/upload-artifact@v4
         with:
-          name: docker-images-dev-${{ github.sha }}
+          name: docker-images-${{ github.sha }}
           path: docker-images/
-          retention-days: 1
+          retention-days: 7
 
 
-  # ============================================================
-  # 2. PUSH DEV ECR
-  #
-  # NO APPROVAL
-  #
-  # ECR repository:
-  #   dev
-  # ============================================================
+  # ==========================================================
+  # 3. TEST
+  # ==========================================================
+
+  test:
+
+    name: Test Application
+
+    needs:
+      - build
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Docker images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images-${{ github.sha }}
+          path: docker-images
+
+      - name: Load user-service image
+        shell: bash
+        run: |
+          set -e
+          docker load -i docker-images/user-service.tar
+
+      - name: Load order-service image
+        shell: bash
+        run: |
+          set -e
+          docker load -i docker-images/order-service.tar
+
+      - name: Run application tests
+        uses: ./.github/actions/test
+        with:
+          user-service-image: user-service:${{ github.sha }}
+          order-service-image: order-service:${{ github.sha }}
+
+
+  # ==========================================================
+  # 4. PUSH TESTED IMAGES TO DEV ECR
+  # ==========================================================
 
   push-dev:
+
     name: Push Images - DEV
 
     needs:
-      - build-dev
-
-    if: >-
-      ${{ inputs.environment == 'dev' &&
-      inputs.build_images &&
-      inputs.terraform_action != 'destroy' &&
-      needs.build-dev.result == 'success' }}
+      - test
 
     runs-on: ubuntu-latest
 
@@ -180,198 +163,46 @@ jobs:
 
     steps:
 
-      - name: Download DEV Docker images
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Docker images
         uses: actions/download-artifact@v4
         with:
-          name: docker-images-dev-${{ github.sha }}
+          name: docker-images-${{ github.sha }}
           path: docker-images
-
-
-      # --------------------------------------------------------
-      # Push user-service
-      # --------------------------------------------------------
 
       - name: Push user-service to DEV ECR
-        uses: ./.github/actions/push-image
+        uses: ./.github/actions/push
         with:
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
           service-name: user-service
-          image-tag: ${{ inputs.user_service_tag || github.sha }}
-          environment-tag: dev
-          ecr-repository: dev
+          image-tag: ${{ github.sha }}
+          ecr-repository: ${{ env.DEV_ECR_REPOSITORY }}
           aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-
-
-      # --------------------------------------------------------
-      # Push order-service
-      # --------------------------------------------------------
 
       - name: Push order-service to DEV ECR
-        uses: ./.github/actions/push-image
+        uses: ./.github/actions/push
         with:
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
           service-name: order-service
-          image-tag: ${{ inputs.order_service_tag || github.sha }}
-          environment-tag: dev
-          ecr-repository: dev
+          image-tag: ${{ github.sha }}
+          ecr-repository: ${{ env.DEV_ECR_REPOSITORY }}
           aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
 
 
-  # ============================================================
-  # 3. BUILD PROD
-  #
-  # IMPORTANT:
-  #
-  # PROD approval happens BEFORE this job starts.
-  #
-  # Therefore:
-  #
-  # PROD Approval
-  #      ↓
-  # Build NEW PROD images
-  #
-  # This does NOT reuse DEV build artifacts.
-  # ============================================================
-
-  build-prod:
-    name: Build Docker Images - PROD
-
-    if: >-
-      ${{ inputs.environment == 'prod' &&
-      inputs.build_images &&
-      inputs.terraform_action != 'destroy' }}
-
-    runs-on: ubuntu-latest
-
-    environment:
-      name: prod
-
-    permissions:
-      contents: read
-
-    steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-
-      # --------------------------------------------------------
-      # Build NEW PROD user-service
-      # --------------------------------------------------------
-
-      - name: Build user-service
-        uses: ./.github/actions/build
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          service-name: user-service
-          dockerfile-path: ./services/user-service
-          image-tag: ${{ inputs.user_service_tag || github.sha }}
-          environment-tag: prod
-
-
-      # --------------------------------------------------------
-      # Build NEW PROD order-service
-      # --------------------------------------------------------
-
-      - name: Build order-service
-        uses: ./.github/actions/build
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          service-name: order-service
-          dockerfile-path: ./services/order-service
-          image-tag: ${{ inputs.order_service_tag || github.sha }}
-          environment-tag: prod
-
-
-      # --------------------------------------------------------
-      # Upload PROD images
-      # --------------------------------------------------------
-
-      - name: Upload PROD Docker images
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-images-prod-${{ github.sha }}
-          path: docker-images/
-          retention-days: 1
-
-
-  # ============================================================
-  # 4. PUSH PROD ECR
-  #
-  # NO environment HERE.
-  #
-  # Approval already happened in build-prod.
-  #
-  # This job only pushes the newly-built PROD images.
-  # ============================================================
-
-  push-prod:
-    name: Push Images - PROD
-
-    needs:
-      - build-prod
-
-    if: >-
-      ${{ inputs.environment == 'prod' &&
-      inputs.build_images &&
-      inputs.terraform_action != 'destroy' &&
-      needs.build-prod.result == 'success' }}
-
-    runs-on: ubuntu-latest
-
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-
-      - name: Download PROD Docker images
-        uses: actions/download-artifact@v4
-        with:
-          name: docker-images-prod-${{ github.sha }}
-          path: docker-images
-
-
-      # --------------------------------------------------------
-      # Push user-service
-      # --------------------------------------------------------
-
-      - name: Push user-service to PROD ECR
-        uses: ./.github/actions/push-image
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          service-name: user-service
-          image-tag: ${{ inputs.user_service_tag || github.sha }}
-          environment-tag: prod
-          ecr-repository: prod
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-
-
-      # --------------------------------------------------------
-      # Push order-service
-      # --------------------------------------------------------
-
-      - name: Push order-service to PROD ECR
-        uses: ./.github/actions/push-image
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          service-name: order-service
-          image-tag: ${{ inputs.order_service_tag || github.sha }}
-          environment-tag: prod
-          ecr-repository: prod
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-
-
-  # ============================================================
-  # 5. TERRAFORM PLAN
+  # ==========================================================
+  # 5. TERRAFORM PLAN - DEV
   #
   # NO APPROVAL
-  # ============================================================
+  # ==========================================================
 
-  terraform-plan:
-    name: Terraform Plan
+  terraform-plan-dev:
 
-    if: ${{ inputs.deploy_infrastructure }}
+    name: Terraform Plan - DEV
+
+    needs:
+      - push-dev
 
     runs-on: ubuntu-latest
 
@@ -384,44 +215,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      - name: Terraform Plan
-        uses: ./.github/actions/deploy-infrastructure
+      - name: Terraform Plan - DEV
+        uses: ./.github/actions/deploy-infra
         with:
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
           terraform-version: ${{ env.TERRAFORM_VERSION }}
-          environment: ${{ inputs.environment }}
-          terraform-dir: terraform/environments
+          environment: dev
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
           tfvars-file: terraform.tfvars
           aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
-          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
-          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+          state-bucket: ${{ secrets.DEV_TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/dev/terraform.tfstate
+          state-lock-table: ${{ secrets.TERRAFORM_LOCK_TABLE }}
           action: plan
 
 
-  # ============================================================
-  # 6. TERRAFORM APPLY
+  # ==========================================================
+  # 6. TERRAFORM APPLY - DEV
   #
-  # DEV  -> DEV approval
-  # PROD -> PROD approval
-  # ============================================================
+  # DEV APPROVAL
+  # ==========================================================
 
-  terraform-apply:
-    name: Terraform Apply
+  terraform-apply-dev:
+
+    name: Terraform Apply - DEV
 
     needs:
-      - terraform-plan
-
-    if: >-
-      ${{ inputs.deploy_infrastructure &&
-      inputs.terraform_action == 'apply' &&
-      needs.terraform-plan.result == 'success' }}
+      - terraform-plan-dev
 
     runs-on: ubuntu-latest
 
     environment:
-      name: ${{ inputs.environment }}
+      name: dev
 
     permissions:
       id-token: write
@@ -432,89 +257,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      - name: Terraform Apply
-        uses: ./.github/actions/deploy-infrastructure
+      - name: Download DEV Terraform plan
+        uses: actions/download-artifact@v4
         with:
-          aws-region: ${{ env.AWS_REGION }}
+          name: terraform-plan-dev
+          path: ${{ env.TERRAFORM_DIR }}/dev
+
+      - name: Terraform Apply - DEV
+        uses: ./.github/actions/deploy-infra
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
           terraform-version: ${{ env.TERRAFORM_VERSION }}
-          environment: ${{ inputs.environment }}
-          terraform-dir: terraform/environments
+          environment: dev
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
           tfvars-file: terraform.tfvars
           aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
-          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
-          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
+          state-bucket: ${{ secrets.DEV_TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/dev/terraform.tfstate
+          state-lock-table: ${{ secrets.TERRAFORM_LOCK_TABLE }}
           action: apply
 
 
-  # ============================================================
-  # 7. TERRAFORM DESTROY
+  # ==========================================================
+  # 7. DEPLOY APPLICATION - DEV
   #
-  # DEV  -> DEV approval
-  # PROD -> PROD approval
-  #
-  # No application deployment after destroy.
-  # ============================================================
-
-  terraform-destroy:
-    name: Terraform Destroy
-
-    if: >-
-      ${{ inputs.deploy_infrastructure &&
-      inputs.terraform_action == 'destroy' }}
-
-    runs-on: ubuntu-latest
-
-    environment:
-      name: ${{ inputs.environment }}
-
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-
-      - name: Terraform Destroy
-        uses: ./.github/actions/deploy-infrastructure
-        with:
-          aws-region: ${{ env.AWS_REGION }}
-          terraform-version: ${{ env.TERRAFORM_VERSION }}
-          environment: ${{ inputs.environment }}
-          terraform-dir: terraform/environments
-          tfvars-file: terraform.tfvars
-          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          state-bucket: ${{ vars.TERRAFORM_STATE_BUCKET }}
-          state-key: microservices/${{ inputs.environment }}/terraform.tfstate
-          state-lock-table: ${{ vars.TERRAFORM_LOCK_TABLE }}
-          action: destroy
-
-
-  # ============================================================
-  # 8. DEPLOY DEV
-  #
-  # NO APPROVAL
-  # ============================================================
+  # No additional approval.
+  # ==========================================================
 
   deploy-dev:
+
     name: Deploy Application - DEV
 
     needs:
-      - build-dev
-      - push-dev
-      - terraform-apply
-
-    if: >-
-      ${{ inputs.environment == 'dev' &&
-      inputs.deploy_application &&
-      inputs.terraform_action != 'destroy' &&
-      (needs.build-dev.result == 'success' || needs.build-dev.result == 'skipped') &&
-      (needs.push-dev.result == 'success' || needs.push-dev.result == 'skipped') &&
-      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
+      - terraform-apply-dev
 
     runs-on: ubuntu-latest
 
@@ -527,50 +302,139 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-
       - name: Deploy to DEV EKS
-        uses: ./.github/actions/deploy-application
+        uses: ./.github/actions/deploy-app
         with:
-          aws-region: ${{ env.AWS_REGION }}
-          cluster-name: microservices-dev-eks
+          aws-region: ${{ secrets.AWS_REGION }}
+          cluster-name: ${{ env.DEV_CLUSTER }}
           environment: dev
-          helm-chart-path: ./helm
-          helm-release-name: microservices-app
-          helm-namespace: default
+          helm-chart-path: ${{ env.HELM_CHART_PATH }}
+          helm-release-name: ${{ env.HELM_RELEASE_NAME }}
+          helm-namespace: ${{ env.HELM_NAMESPACE }}
           helm-values-file: helm/values-dev.yaml
-          user-service-image-tag: ${{ inputs.user_service_tag || github.sha }}
-          order-service-image-tag: ${{ inputs.order_service_tag || github.sha }}
+          user-service-image-tag: ${{ github.sha }}
+          order-service-image-tag: ${{ github.sha }}
           aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           helm-timeout: 10m
           wait-for-rollout: true
 
 
-  # ============================================================
-  # 9. DEPLOY PROD
-  #
-  # PROD approval required.
-  # ============================================================
+  # ==========================================================
+  # 8. DEV SMOKE TEST
+  # ==========================================================
 
-  deploy-prod:
-    name: Deploy Application - PROD
+  smoke-test-dev:
+
+    name: Smoke Test - DEV
 
     needs:
-      - build-prod
-      - push-prod
-      - terraform-apply
+      - deploy-dev
 
-    if: >-
-      ${{ inputs.environment == 'prod' &&
-      inputs.deploy_application &&
-      inputs.terraform_action != 'destroy' &&
-      (needs.build-prod.result == 'success' || needs.build-prod.result == 'skipped') &&
-      (needs.push-prod.result == 'success' || needs.push-prod.result == 'skipped') &&
-      (needs.terraform-apply.result == 'success' || needs.terraform-apply.result == 'skipped') }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Configure kubectl
+        shell: bash
+        run: |
+          set -e
+
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${DEV_CLUSTER}"
+
+      - name: Smoke test DEV
+        shell: bash
+        run: |
+          set -e
+
+          kubectl cluster-info
+
+          kubectl get pods \
+            --namespace "${HELM_NAMESPACE}" \
+            -o wide
+
+          kubectl rollout status \
+            deployment/user-service \
+            --namespace "${HELM_NAMESPACE}" \
+            --timeout=10m
+
+          kubectl rollout status \
+            deployment/order-service \
+            --namespace "${HELM_NAMESPACE}" \
+            --timeout=10m
+
+          echo "DEV smoke test passed."
+
+
+  # ==========================================================
+  # 9. TERRAFORM PLAN - PROD
+  #
+  # NO APPROVAL
+  #
+  # Only runs after DEV smoke test succeeds.
+  # ==========================================================
+
+  terraform-plan-prod:
+
+    name: Terraform Plan - PROD
+
+    needs:
+      - smoke-test-dev
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform Plan - PROD
+        uses: ./.github/actions/deploy-infra
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          environment: prod
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ secrets.PROD_TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/prod/terraform.tfstate
+          state-lock-table: ${{ secrets.TERRAFORM_LOCK_TABLE }}
+          action: plan
+
+
+  # ==========================================================
+  # 10. TERRAFORM APPLY - PROD
+  #
+  # prod-infra APPROVAL
+  # ==========================================================
+
+  terraform-apply-prod:
+
+    name: Terraform Apply - PROD
+
+    needs:
+      - terraform-plan-prod
 
     runs-on: ubuntu-latest
 
     environment:
-      name: prod
+      name: prod-infra
 
     permissions:
       id-token: write
@@ -581,19 +445,235 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Download PROD Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-prod
+          path: ${{ env.TERRAFORM_DIR }}/prod
+
+      - name: Terraform Apply - PROD
+        uses: ./.github/actions/deploy-infra
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          environment: prod
+          terraform-dir: ${{ env.TERRAFORM_DIR }}
+          tfvars-file: terraform.tfvars
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          state-bucket: ${{ secrets.PROD_TERRAFORM_STATE_BUCKET }}
+          state-key: microservices/prod/terraform.tfstate
+          state-lock-table: ${{ secrets.TERRAFORM_LOCK_TABLE }}
+          action: apply
+
+
+  # ==========================================================
+  # 11. PROMOTE SAME TESTED IMAGES TO PROD ECR
+  #
+  # NO BUILD HERE.
+  # ==========================================================
+
+  promote-prod:
+
+    name: Promote Images - PROD
+
+    needs:
+      - terraform-apply-prod
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download tested Docker images
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images-${{ github.sha }}
+          path: docker-images
+
+      - name: Push user-service to PROD ECR
+        uses: ./.github/actions/push
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          service-name: user-service
+          image-tag: ${{ github.sha }}
+          ecr-repository: ${{ env.PROD_ECR_REPOSITORY }}
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+      - name: Push order-service to PROD ECR
+        uses: ./.github/actions/push
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          service-name: order-service
+          image-tag: ${{ github.sha }}
+          ecr-repository: ${{ env.PROD_ECR_REPOSITORY }}
+          aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+
+  # ==========================================================
+  # 12. DEPLOY APPLICATION - PROD
+  #
+  # prod-app APPROVAL
+  # ==========================================================
+
+  deploy-prod:
+
+    name: Deploy Application - PROD
+
+    needs:
+      - promote-prod
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: prod-app
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Deploy to PROD EKS
-        uses: ./.github/actions/deploy-application
+        uses: ./.github/actions/deploy-app
         with:
-          aws-region: ${{ env.AWS_REGION }}
-          cluster-name: microservices-prod-eks
+          aws-region: ${{ secrets.AWS_REGION }}
+          cluster-name: ${{ env.PROD_CLUSTER }}
           environment: prod
-          helm-chart-path: ./helm
-          helm-release-name: microservices-app
-          helm-namespace: default
+          helm-chart-path: ${{ env.HELM_CHART_PATH }}
+          helm-release-name: ${{ env.HELM_RELEASE_NAME }}
+          helm-namespace: ${{ env.HELM_NAMESPACE }}
           helm-values-file: helm/values-prod.yaml
-          user-service-image-tag: ${{ inputs.user_service_tag || github.sha }}
-          order-service-image-tag: ${{ inputs.order_service_tag || github.sha }}
+          user-service-image-tag: ${{ github.sha }}
+          order-service-image-tag: ${{ github.sha }}
           aws-role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           helm-timeout: 10m
           wait-for-rollout: true
+
+
+  # ==========================================================
+  # 13. PROD SMOKE TEST
+  # ==========================================================
+
+  smoke-test-prod:
+
+    name: Smoke Test - PROD
+
+    needs:
+      - deploy-prod
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Configure kubectl
+        shell: bash
+        run: |
+          set -e
+
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${PROD_CLUSTER}"
+
+      - name: Smoke test PROD
+        shell: bash
+        run: |
+          set -e
+
+          kubectl cluster-info
+
+          kubectl get pods \
+            --namespace "${HELM_NAMESPACE}" \
+            -o wide
+
+          kubectl rollout status \
+            deployment/user-service \
+            --namespace "${HELM_NAMESPACE}" \
+            --timeout=10m
+
+          kubectl rollout status \
+            deployment/order-service \
+            --namespace "${HELM_NAMESPACE}" \
+            --timeout=10m
+
+          echo "PROD smoke test passed."
+
+
+  # ==========================================================
+  # 14. SUMMARY
+  # ==========================================================
+
+  summary:
+
+    name: Pipeline Summary
+
+    needs:
+      - validate
+      - build
+      - test
+      - push-dev
+      - terraform-plan-dev
+      - terraform-apply-dev
+      - deploy-dev
+      - smoke-test-dev
+      - terraform-plan-prod
+      - terraform-apply-prod
+      - promote-prod
+      - deploy-prod
+      - smoke-test-prod
+
+    if: always()
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Pipeline summary
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "CI/CD PIPELINE SUMMARY"
+          echo "=========================================="
+
+          echo ""
+          echo "Commit: ${{ github.sha }}"
+
+          echo ""
+          echo "DEV"
+          echo "Validate        : ${{ needs.validate.result }}"
+          echo "Build           : ${{ needs.build.result }}"
+          echo "Test            : ${{ needs.test.result }}"
+          echo "Push ECR        : ${{ needs.push-dev.result }}"
+          echo "Terraform Plan  : ${{ needs.terraform-plan-dev.result }}"
+          echo "Terraform Apply : ${{ needs.terraform-apply-dev.result }}"
+          echo "Deploy          : ${{ needs.deploy-dev.result }}"
+          echo "Smoke Test      : ${{ needs.smoke-test-dev.result }}"
+
+          echo ""
+          echo "PROD"
+          echo "Terraform Plan  : ${{ needs.terraform-plan-prod.result }}"
+          echo "Terraform Apply : ${{ needs.terraform-apply-prod.result }}"
+          echo "Image Promote   : ${{ needs.promote-prod.result }}"
+          echo "Deploy          : ${{ needs.deploy-prod.result }}"
+          echo "Smoke Test      : ${{ needs.smoke-test-prod.result }}"
+
+          echo ""
+          echo "=========================================="

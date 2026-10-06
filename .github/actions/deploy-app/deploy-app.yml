@@ -1,0 +1,378 @@
+name: Deploy Application to EKS
+
+description: Deploy application to Amazon EKS using Helm
+
+inputs:
+
+  aws-region:
+    description: AWS Region
+    required: false
+    default: us-east-1
+
+  cluster-name:
+    description: EKS cluster name
+    required: true
+
+  environment:
+    description: Deployment environment
+    required: true
+
+  helm-chart-path:
+    description: Helm chart path
+    required: true
+    default: ./helm
+
+  helm-release-name:
+    description: Helm release name
+    required: true
+    default: microservices-app
+
+  helm-namespace:
+    description: Kubernetes namespace
+    required: true
+    default: default
+
+  helm-values-file:
+    description: Helm values file
+    required: true
+
+  user-service-image-tag:
+    description: User service image tag
+    required: true
+
+  order-service-image-tag:
+    description: Order service image tag
+    required: true
+
+  aws-role-to-assume:
+    description: AWS IAM role ARN for GitHub OIDC
+    required: true
+
+  helm-timeout:
+    description: Helm deployment timeout
+    required: false
+    default: 10m
+
+  wait-for-rollout:
+    description: Wait for Kubernetes rollout
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+
+  steps:
+
+    # ==========================================================
+    # AWS OIDC
+    # ==========================================================
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+
+
+    # ==========================================================
+    # Verify AWS
+    # ==========================================================
+
+    - name: Verify AWS identity
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "AWS Identity"
+        echo "=========================================="
+
+        aws sts get-caller-identity
+
+
+    # ==========================================================
+    # Install kubectl
+    # ==========================================================
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: latest
+
+
+    # ==========================================================
+    # Install Helm
+    # ==========================================================
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: latest
+
+
+    # ==========================================================
+    # Configure EKS
+    # ==========================================================
+
+    - name: Configure kubectl for EKS
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Configure EKS"
+        echo "=========================================="
+
+        echo "Cluster : $CLUSTER_NAME"
+        echo "Region  : $AWS_REGION"
+
+        aws eks update-kubeconfig \
+          --region "$AWS_REGION" \
+          --name "$CLUSTER_NAME"
+
+        echo ""
+        echo "Kubeconfig configured successfully."
+
+
+    # ==========================================================
+    # Verify Kubernetes Access
+    # ==========================================================
+
+    - name: Verify Kubernetes access
+      shell: bash
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Kubernetes Access"
+        echo "=========================================="
+
+        kubectl cluster-info
+
+        echo ""
+        echo "Kubernetes nodes:"
+
+        kubectl get nodes
+
+
+    # ==========================================================
+    # Verify Helm Chart
+    # ==========================================================
+
+    - name: Helm Lint
+      shell: bash
+      env:
+        HELM_CHART_PATH: ${{ inputs.helm-chart-path }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Helm Lint"
+        echo "=========================================="
+
+        helm lint "$HELM_CHART_PATH"
+
+        echo ""
+        echo "Helm lint passed."
+
+
+    # ==========================================================
+    # Display Deployment Information
+    # ==========================================================
+
+    - name: Display deployment parameters
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RELEASE_NAME: ${{ inputs.helm-release-name }}
+        NAMESPACE: ${{ inputs.helm-namespace }}
+        VALUES_FILE: ${{ inputs.helm-values-file }}
+        USER_SERVICE_TAG: ${{ inputs.user-service-image-tag }}
+        ORDER_SERVICE_TAG: ${{ inputs.order-service-image-tag }}
+      run: |
+        echo "=========================================="
+        echo "Application Deployment"
+        echo "=========================================="
+
+        echo "Environment       : $ENVIRONMENT"
+        echo "Cluster           : $CLUSTER_NAME"
+        echo "Helm Release      : $RELEASE_NAME"
+        echo "Namespace         : $NAMESPACE"
+        echo "Values File       : $VALUES_FILE"
+        echo "User Service Tag  : $USER_SERVICE_TAG"
+        echo "Order Service Tag : $ORDER_SERVICE_TAG"
+
+        echo "=========================================="
+
+
+    # ==========================================================
+    # Helm Deployment
+    # ==========================================================
+
+    - name: Deploy application with Helm
+      shell: bash
+      env:
+        HELM_CHART_PATH: ${{ inputs.helm-chart-path }}
+        HELM_RELEASE_NAME: ${{ inputs.helm-release-name }}
+        HELM_NAMESPACE: ${{ inputs.helm-namespace }}
+        HELM_VALUES_FILE: ${{ inputs.helm-values-file }}
+        USER_SERVICE_TAG: ${{ inputs.user-service-image-tag }}
+        ORDER_SERVICE_TAG: ${{ inputs.order-service-image-tag }}
+        HELM_TIMEOUT: ${{ inputs.helm-timeout }}
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Helm Deployment"
+        echo "=========================================="
+
+        helm upgrade \
+          --install \
+          "$HELM_RELEASE_NAME" \
+          "$HELM_CHART_PATH" \
+          --namespace "$HELM_NAMESPACE" \
+          --create-namespace \
+          --values "$HELM_VALUES_FILE" \
+          --set "userService.image.tag=$USER_SERVICE_TAG" \
+          --set "orderService.image.tag=$ORDER_SERVICE_TAG" \
+          --set "environment=$ENVIRONMENT" \
+          --timeout "$HELM_TIMEOUT" \
+          --wait
+
+        echo ""
+        echo "Helm deployment completed successfully."
+
+
+    # ==========================================================
+    # Helm Status
+    # ==========================================================
+
+    - name: Verify Helm release
+      shell: bash
+      env:
+        HELM_RELEASE_NAME: ${{ inputs.helm-release-name }}
+        HELM_NAMESPACE: ${{ inputs.helm-namespace }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Helm Release Status"
+        echo "=========================================="
+
+        helm status \
+          "$HELM_RELEASE_NAME" \
+          --namespace "$HELM_NAMESPACE"
+
+        echo ""
+        echo "Helm release is healthy."
+
+
+    # ==========================================================
+    # Kubernetes Resources
+    # ==========================================================
+
+    - name: Show Kubernetes resources
+      shell: bash
+      env:
+        HELM_NAMESPACE: ${{ inputs.helm-namespace }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Kubernetes Resources"
+        echo "=========================================="
+
+        echo ""
+        echo "Pods:"
+        kubectl get pods \
+          --namespace "$HELM_NAMESPACE" \
+          -o wide
+
+        echo ""
+        echo "Services:"
+        kubectl get services \
+          --namespace "$HELM_NAMESPACE"
+
+        echo ""
+        echo "Deployments:"
+        kubectl get deployments \
+          --namespace "$HELM_NAMESPACE"
+
+
+    # ==========================================================
+    # Wait For Rollout
+    # ==========================================================
+
+    - name: Wait for user-service rollout
+      if: inputs.wait-for-rollout == 'true'
+      shell: bash
+      env:
+        HELM_RELEASE_NAME: ${{ inputs.helm-release-name }}
+        HELM_NAMESPACE: ${{ inputs.helm-namespace }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "User Service Rollout"
+        echo "=========================================="
+
+        kubectl rollout status \
+          deployment/user-service \
+          --namespace "$HELM_NAMESPACE" \
+          --timeout="${{ inputs.helm-timeout }}"
+
+        echo ""
+        echo "user-service rollout completed."
+
+
+    - name: Wait for order-service rollout
+      if: inputs.wait-for-rollout == 'true'
+      shell: bash
+      env:
+        HELM_NAMESPACE: ${{ inputs.helm-namespace }}
+      run: |
+        set -e
+
+        echo "=========================================="
+        echo "Order Service Rollout"
+        echo "=========================================="
+
+        kubectl rollout status \
+          deployment/order-service \
+          --namespace "$HELM_NAMESPACE" \
+          --timeout="${{ inputs.helm-timeout }}"
+
+        echo ""
+        echo "order-service rollout completed."
+
+
+    # ==========================================================
+    # Final Deployment Summary
+    # ==========================================================
+
+    - name: Deployment summary
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        USER_SERVICE_TAG: ${{ inputs.user-service-image-tag }}
+        ORDER_SERVICE_TAG: ${{ inputs.order-service-image-tag }}
+      run: |
+        echo ""
+        echo "=========================================="
+        echo "Deployment Successful"
+        echo "=========================================="
+
+        echo "Environment       : $ENVIRONMENT"
+        echo "Cluster           : $CLUSTER_NAME"
+        echo "User Service      : $USER_SERVICE_TAG"
+        echo "Order Service     : $ORDER_SERVICE_TAG"
+
+        echo ""
+        echo "Application deployment completed."
+        echo "=========================================="
